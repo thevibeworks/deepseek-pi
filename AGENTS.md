@@ -112,6 +112,28 @@ The capture hooks sit on the loop's tool-call seam, which unit tests cannot
 reach. `TestLiveCheckpointWiring` is what proves they are connected; without it
 a disconnected hook fails silently, as a rewind that finds nothing to restore.
 
+## Budgets
+
+`harness/budget.go` bounds the session; `Budget` in `harness/task.go` bounds one
+sub-agent. Keep them apart — the scopes genuinely differ, and merging them would
+put a wall-clock limit on an interactive session where the wait between prompts
+is a user thinking.
+
+Enforce on `ShouldStopAfterTurn`, never mid-turn. It is the same seam compaction
+uses, for the same reason: cutting anywhere else leaves a tool call unanswered
+and the provider rejects the transcript outright. Overshooting by one turn is
+the accepted cost.
+
+`Spent()` must keep counting sub-agents. A loop that delegates is still a loop,
+and on a single delegating turn the child was 83% of the spend.
+
+Read cost through the harness rather than keeping a second tally beside it. A
+budget that trips at a number different from the one `/status` prints is a bug
+report, and the two would drift the first time an accounting path changed.
+
+Raising a limit has to clear the recorded stop, or the raise does nothing and
+the next request is refused by the answer to the previous one.
+
 ## The prompt cache
 
 `/cache` reports why the prefix cache missed and what it cost. It should say

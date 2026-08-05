@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -460,5 +461,50 @@ func TestLiveCheckpointWiring(t *testing.T) {
 	}
 	if string(got) != string(before) {
 		t.Errorf("the file did not go back:\n got: %s\nwant: %s", got, before)
+	}
+}
+
+// TestLiveBudgetCountsRealSpend checks the one thing a fake provider cannot:
+// that provider-reported usage becomes a cost the budget actually enforces
+// against, sub-agent spend included.
+//
+// The fake-provider tests prove the hook is connected. This proves the number
+// flowing through it is real money.
+func TestLiveBudgetCountsRealSpend(t *testing.T) {
+	dir := liveWorkspace(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	// Two turns is enough to be stopped by a task that plainly needs more.
+	h, err := New(ctx, Options{Cwd: dir, Mode: ModeYolo, NoSkills: true, MaxTurns: 2})
+	if err != nil {
+		t.Fatalf("harness: %v", err)
+	}
+	defer func() { _ = h.Close() }()
+
+	_, err = h.Prompt(ctx, "Read alpha.go, then beta.go, then bulk.go, one tool call at a "+
+		"time, and tell me the three constants. Do not batch the reads.")
+
+	var stop BudgetStop
+	if !errors.As(err, &stop) {
+		t.Fatalf("a 2-turn budget did not stop a task needing more: %v", err)
+	}
+	if stop.Spent <= 0 {
+		t.Errorf("the stop reports $%.6f spent; real usage is not reaching the guard", stop.Spent)
+	}
+	if stop.Spent != h.Spent() {
+		t.Errorf("the stop says $%.6f but the session says $%.6f; the budget and the "+
+			"reported cost have drifted apart", stop.Spent, h.Spent())
+	}
+	t.Logf("stopped after %d turns having spent $%.6f", stop.Turns, stop.Spent)
+
+	// Over budget on cost must refuse before spending anything more.
+	h.Budget.SetLimits(SessionBudget{MaxCost: h.Spent() / 2})
+	spentBefore := h.Spent()
+	if _, err := h.Prompt(ctx, "What is 2+2?"); !errors.Is(err, ErrBudgetExceeded) {
+		t.Fatalf("an over-budget session was not refused: %v", err)
+	}
+	if after := h.Spent(); after != spentBefore {
+		t.Errorf("the refused request still spent $%.6f", after-spentBefore)
 	}
 }

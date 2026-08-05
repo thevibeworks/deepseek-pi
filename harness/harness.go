@@ -43,6 +43,13 @@ type Options struct {
 	// wants a minimal prefix should be able to say so.
 	NoSkills bool
 
+	// MaxCost stops the session once it has spent this many USD, sub-agents
+	// included. Zero is unbounded.
+	MaxCost float64
+	// MaxTurns stops a single request after this many assistant turns. Zero is
+	// unbounded. See SessionBudget for why the two axes differ in scope.
+	MaxTurns int
+
 	// Mode is the permission posture. Empty means ModeDefault.
 	Mode Mode
 	// AllowTools pre-approves tool names for the session.
@@ -81,12 +88,55 @@ type Harness struct {
 	// assumed.
 	Cache *CacheTracker
 
+	// Budget bounds what the session may spend. Exposed so a UI can show the
+	// remaining headroom and raise a limit without rebuilding the harness.
+	Budget *BudgetGuard
+
 	// Skills and Instructions are exposed for status output.
 	Skills       []Skill
 	Instructions []InstructionFile
 
 	mu       sync.Mutex
 	children []ChildReport
+}
+
+// Prompt runs one request under the session budget.
+//
+// Callers should use this rather than h.Agent.Prompt: the per-request turn
+// count resets here, and a run already past its cost ceiling is refused before
+// it can spend another turn discovering that.
+//
+// The messages are returned even when a budget stopped the run — a truncated
+// answer is still the work that was paid for. The error says which limit fired;
+// errors.Is(err, ErrBudgetExceeded) tells it apart from a failed request.
+func (h *Harness) Prompt(ctx context.Context, text string) ([]ai.Message, error) {
+	if err := h.Budget.begin(); err != nil {
+		return nil, err
+	}
+	msgs, err := h.Agent.Prompt(ctx, text)
+	if err != nil {
+		return msgs, err
+	}
+	if stop := h.Budget.Stop(); stop != nil {
+		return msgs, *stop
+	}
+	return msgs, nil
+}
+
+// Spent is what this run has cost in USD: the parent transcript plus every
+// sub-agent it spawned.
+//
+// Sub-agents count because they are the parent's spending — a loop that
+// delegates is still a loop, and a budget blind to children would watch a
+// session spend most of its money outside the number it was checking.
+func (h *Harness) Spent() float64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	total := h.Session.Usage.Cost.Total
+	for _, c := range h.children {
+		total += c.Usage.Cost.Total
+	}
+	return total
 }
 
 // Children returns the sub-agents this session has run.
@@ -244,6 +294,13 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 	// writing to a file that has since been closed.
 	var h *Harness
 
+	// Reads cost through h for the same reason: the figure it enforces against
+	// must be the one the session reports, not a private tally beside it.
+	budget := NewBudgetGuard(
+		SessionBudget{MaxCost: opts.MaxCost, MaxTurns: opts.MaxTurns},
+		func() float64 { return h.Spent() },
+	)
+
 	cfg := agent.LoopConfig{
 		Model:         model.ID,
 		Effort:        opts.Effort,
@@ -254,6 +311,9 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 		// safe point: mid-turn the transcript holds an assistant message whose
 		// tool calls are still unanswered, and rewriting there orphans them.
 		PrepareNextTurn: compactor.PrepareNextTurn,
+		// Same seam, and for the same reason: it is the only point where a run
+		// can be cut without leaving a tool call unanswered.
+		ShouldStopAfterTurn: budget.afterTurn,
 		BeforeToolCall: func(c context.Context, call agent.ToolCall, actx *agent.Context) agent.BeforeToolResult {
 			decision := approve(c, policy, opts.Approve, call)
 			if !decision.Block {
@@ -280,7 +340,7 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 	h = &Harness{
 		Agent: a, Session: session, Client: client,
 		Workspace: ws, Model: model, Policy: policy, Compactor: compactor,
-		Cache: tracker, Checkpoints: checkpoints,
+		Cache: tracker, Checkpoints: checkpoints, Budget: budget,
 		Skills: skills, Instructions: instructions,
 	}
 

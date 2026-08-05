@@ -37,6 +37,8 @@ type flags struct {
 	resume      string
 	continueRun bool
 	maxTokens   int
+	maxCost     float64
+	maxTurns    int
 	yolo        bool
 	plan        bool
 	noSkills    bool
@@ -62,6 +64,8 @@ func parseFlags() *flags {
 	flag.StringVar(&f.resume, "r", "", "resume a session by file path")
 	flag.BoolVar(&f.continueRun, "c", false, "continue the most recent session in this workspace")
 	flag.IntVar(&f.maxTokens, "max-tokens", 0, "cap output tokens per turn")
+	flag.Float64Var(&f.maxCost, "max-cost", 0, "stop the session after spending this many USD, sub-agents included")
+	flag.IntVar(&f.maxTurns, "max-turns", 0, "stop a single request after this many turns")
 	flag.BoolVar(&f.yolo, "yolo", false, "run every tool without asking (sandboxes and CI)")
 	flag.BoolVar(&f.plan, "plan", false, "read-only: investigate and propose, never modify")
 	flag.BoolVar(&f.noSkills, "no-skills", false, "skip skill discovery, for a minimal prompt prefix")
@@ -98,6 +102,12 @@ Permissions:
   Reading and read-only shell always run. Anything that can change the
   machine asks first in an interactive session. A headless run (-p) has
   nobody to ask, so it refuses instead — pass -yolo or -allow to opt in.
+
+Budgets:
+  -max-cost bounds the whole run in dollars, sub-agents included.
+  -max-turns bounds one request, which is what catches a loop. Either
+  stops at a turn boundary and exits non-zero under -p; interactively,
+  /budget raises the limit and continues.
 
 Flags:
 `, harness.Name, harness.Version)
@@ -173,6 +183,8 @@ func run() error {
 		Model:       normalizeModel(f.model),
 		Effort:      ai.Effort(f.effort),
 		MaxTokens:   f.maxTokens,
+		MaxCost:     f.maxCost,
+		MaxTurns:    f.maxTurns,
 		Resume:      resume,
 		NoSkills:    f.noSkills,
 		NoSubagents: f.noSubagents,
@@ -259,10 +271,12 @@ func normalizeModel(m string) string {
 func runOnce(ctx context.Context, h *harness.Harness, r *renderer, prompt string, s style, in *interrupter) error {
 	// A headless run has one thing in flight, so Ctrl-C means cancel it.
 	runCtx, done := in.arm(ctx)
-	_, err := h.Agent.Prompt(runCtx, prompt)
+	_, err := h.Prompt(runCtx, prompt)
 	done()
 	r.Finish()
 	if err != nil {
+		// A budget stop is returned as an error on purpose: a script that pipes
+		// the answer somewhere must not treat a truncated one as complete.
 		return err
 	}
 	if !r.Quiet {
@@ -308,16 +322,29 @@ func runInteractive(
 
 		// Ctrl-C is armed only while a turn is in flight, so it ends the run and
 		// returns to the prompt instead of tearing down the session.
+		// Usage is cumulative, so it is only worth reprinting when this request
+		// actually moved it. A refused one that spent nothing would otherwise
+		// echo the previous total and read as if it had cost that again.
+		before := h.Session.Usage.Total()
+
 		turnCtx, done := sig.arm(ctx)
-		_, err := h.Agent.Prompt(turnCtx, line)
+		_, err := h.Prompt(turnCtx, line)
 		r.Finish()
 		done()
 
-		if err != nil {
+		var stop harness.BudgetStop
+		switch {
+		case errors.As(err, &stop):
+			// Not a failure: the work up to here is real and kept. Say what
+			// stopped it and how to continue, in one line.
+			fmt.Fprintf(os.Stderr, "%s%v%s\n", s.yellow, stop, s.reset)
+		case err != nil:
 			fmt.Fprintf(os.Stderr, "%serror:%s %v\n", s.red, s.reset, err)
 		}
-		if line := formatUsage(h.Model, h.Session.Usage, s); line != "" {
-			fmt.Println(line)
+		if h.Session.Usage.Total() != before {
+			if line := formatUsage(h.Model, h.Session.Usage, s); line != "" {
+				fmt.Println(line)
+			}
 		}
 		fmt.Println()
 
@@ -341,6 +368,8 @@ func handleCommand(h *harness.Harness, r *renderer, line string, s style) (bool,
   /effort [off|low|high|xhigh|max]
                        show or change the reasoning level
   /cache               why the prompt cache missed, and what it cost
+  /budget [cost N|turns N|off]
+                       show or change the spending limits
   /compact             summarize earlier turns now, freeing context
   /turns               list the turns you can rewind or fork at
   /rewind [N]          drop turn N onward and restore the files it changed
@@ -418,6 +447,9 @@ func handleCommand(h *harness.Harness, r *renderer, line string, s style) (bool,
 	case "cache":
 		fmt.Print(h.Cache.Report())
 
+	case "budget":
+		return false, budgetCommand(h, arg, s)
+
 	case "compact":
 		actx := h.Agent.Context()
 		before := harness.EstimateTokens(actx.Messages)
@@ -478,6 +510,58 @@ func handleCommand(h *harness.Harness, r *renderer, line string, s style) (bool,
 		return false, fmt.Errorf("unknown command /%s (try /help)", cmd)
 	}
 	return false, nil
+}
+
+// budgetCommand shows or changes the session limits.
+//
+// Raising a limit is how a user answers a stop, so the write path has to be one
+// line at the prompt. Anything that required a restart would make the budget a
+// thing to avoid setting rather than a thing to use.
+func budgetCommand(h *harness.Harness, arg string, s style) error {
+	limits := h.Budget.Limits()
+
+	if arg != "" {
+		axis, value, _ := strings.Cut(arg, " ")
+		value = strings.TrimSpace(value)
+		switch axis {
+		case "off":
+			limits = harness.SessionBudget{}
+		case "cost":
+			n, err := strconv.ParseFloat(value, 64)
+			if err != nil || n < 0 {
+				return fmt.Errorf("cost must be a number of dollars, got %q", value)
+			}
+			limits.MaxCost = n
+		case "turns":
+			n, err := strconv.Atoi(value)
+			if err != nil || n < 0 {
+				return fmt.Errorf("turns must be a whole number, got %q", value)
+			}
+			limits.MaxTurns = n
+		default:
+			return fmt.Errorf("unknown budget %q (try: cost N, turns N, off)", axis)
+		}
+		h.Budget.SetLimits(limits)
+	}
+
+	spent := h.Budget.Spent()
+	if limits.Empty() {
+		fmt.Printf("%sno budget · spent %s so far%s\n", s.dim, harness.Money(spent), s.reset)
+		return nil
+	}
+	if limits.MaxCost > 0 {
+		fmt.Printf("%scost%s   %s of %s (%.0f%% used)\n",
+			s.bold, s.reset, harness.Money(spent), harness.Money(limits.MaxCost),
+			spent/limits.MaxCost*100)
+	} else {
+		fmt.Printf("%scost%s   %s spent, no limit\n", s.bold, s.reset, harness.Money(spent))
+	}
+	if limits.MaxTurns > 0 {
+		fmt.Printf("%sturns%s  %d per request\n", s.bold, s.reset, limits.MaxTurns)
+	} else {
+		fmt.Printf("%sturns%s  no limit per request\n", s.bold, s.reset)
+	}
+	return nil
 }
 
 // parseTurn reads an optional turn number. Empty means "the default one for
@@ -623,6 +707,17 @@ func printStatus(h *harness.Harness, s style) {
 		// folding them in would make the parent's context look enormous.
 		fmt.Printf("%ssub-agents%s   %d run · %d tokens · $%.4f (separate transcripts)\n",
 			s.bold, s.reset, len(children), childTokens, childCost)
+	}
+	if limits := h.Budget.Limits(); !limits.Empty() {
+		var parts []string
+		if limits.MaxCost > 0 {
+			parts = append(parts, fmt.Sprintf("%s of %s",
+				harness.Money(h.Budget.Spent()), harness.Money(limits.MaxCost)))
+		}
+		if limits.MaxTurns > 0 {
+			parts = append(parts, fmt.Sprintf("%d turns per request", limits.MaxTurns))
+		}
+		fmt.Printf("%sbudget%s       %s\n", s.bold, s.reset, strings.Join(parts, " · "))
 	}
 	if n := len(h.Cache.Breaks); n > 0 {
 		fmt.Printf("%scache breaks%s %d, %d tokens re-billed (/cache for why)\n",

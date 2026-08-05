@@ -48,14 +48,16 @@ deepseek-pi "prompt"             same, positional
 deepseek-pi -c                   continue the most recent session here
 deepseek-pi -m pro -e high ...   pro model, high reasoning effort
 deepseek-pi -plan                read-only: investigate and propose
+deepseek-pi -max-cost 2.50       stop the run after $2.50
+deepseek-pi -max-turns 40        stop one request after 40 turns
 deepseek-pi -sessions            list stored sessions
 deepseek-pi -prune               drop checkpoint data no session refers to
 deepseek-pi -show-prompt         print the assembled system prompt
 ```
 
 Slash commands in an interactive session: `/mode`, `/model`, `/effort`,
-`/compact`, `/cache`, `/turns`, `/rewind`, `/fork`, `/status`, `/prompt`,
-`/session`, `/thinking`, `/clear`, `/exit`.
+`/compact`, `/cache`, `/budget`, `/turns`, `/rewind`, `/fork`, `/status`,
+`/prompt`, `/session`, `/thinking`, `/clear`, `/exit`.
 
 ## Branching
 
@@ -150,6 +152,44 @@ impossible because a child's tool set simply does not contain `task` — no dept
 counter to tune or get wrong. And a child is bounded by the **stricter** of its
 role and its parent, so an `implementer` under a `-plan` parent still cannot
 write; a mode another setting can escape is not a mode.
+
+## Budgets
+
+Sub-agents have always been bounded; the session itself was not. `-max-cost`
+and `-max-turns` bound it, and `/budget` shows or changes them mid-session.
+
+```
+$ /budget
+cost   $0.0012 of $2.5000 (0% used)
+turns  40 per request
+
+$ /budget cost 5
+```
+
+The two axes have **different scopes on purpose**. `-max-cost` is cumulative
+over the run, because money only accumulates and the question it answers is how
+much you are willing to spend today. `-max-turns` bounds one request, because a
+session that has answered forty questions is working while one request that took
+forty turns is looping — making it cumulative would stop a productive session at
+a point cost already covers better, and would say nothing about loops.
+
+**Sub-agent spend counts.** A loop that delegates is still a loop. Measured on a
+single delegating turn: parent $0.0002, child $0.0010 — a budget watching only
+the parent would have missed 83% of the money.
+
+Both stop at a turn boundary, the same seam compaction uses, because mid-turn
+the transcript holds an assistant message whose tool calls are unanswered and a
+provider rejects that outright. So a stop can overshoot by at most one turn.
+That is the price of never producing a broken transcript.
+
+A stop is not a wall. Interactively it prints what fired and how to raise it,
+and raising it clears the stop so the next prompt continues. Under `-p` there is
+nobody to ask, so the run exits non-zero — a script piping the answer somewhere
+must not treat a truncated one as complete. The default is no budget: a limit
+nobody asked for that silently truncates a long task is worse than none.
+
+Being over budget also refuses to *start* a request, rather than buying one more
+turn to discover it is over.
 
 ## Permissions
 
@@ -405,10 +445,10 @@ should stay that way.
 ## Status
 
 Early. The loop, tools, permissions, compaction, sessions, accounting and the
-eval harness, cache-break attribution, sub-agents, session branching and
-workspace checkpointing work and are tested against the live API. Not yet
-built: a session-level cost budget, readline-style input (a pasted block is
-still one turn per line), a scheduler and a full-screen TUI.
+eval harness, cache-break attribution, sub-agents, session branching, workspace
+checkpointing and session budgets work and are tested against the live API. Not
+yet built: readline-style input (a pasted block is still one turn per line), a
+scheduler and a full-screen TUI.
 
 ## License
 
