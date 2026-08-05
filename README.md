@@ -298,9 +298,23 @@ you want that resolution, raise `-repeat` — more samples, not a tighter number
 Current baseline (flash, 5 repeats, medians):
 
 ```
-3/3 passed · 36468 in / 2971 out · cache 82% · $0.0017 · 30s
-widest input-token spread within a task: 101%
+3/3 passed · 41701 in / 3042 out · cache 83% · $0.0019 · 29s
+widest input-token spread within a task: 44%
 ```
+
+A worked example of the limit. Adding the `task` tool moved the suite's input
+tokens by +15.7%, comfortably inside the noise floor, so the gate passed and
+told us nothing about efficiency. The structural cost of that change is not a
+question the eval can answer — but it is deterministic, so measure it directly:
+
+```
+$ deepseek-pi -no-skills -show-prompt | wc -c              # 2206
+$ deepseek-pi -no-skills -no-subagents -show-prompt | wc -c # 1824
+```
+
+95 tokens per turn, 0.3% of the prompt. The +15.7% was noise. Reach for the
+eval to answer "did this still work"; reach for a deterministic measurement to
+answer "what did this cost".
 
 ## Development
 
