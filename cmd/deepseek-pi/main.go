@@ -2,7 +2,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -164,11 +163,8 @@ func run() error {
 		return err
 	}
 
-	// One scanner for the whole process: the REPL and the approval prompt read
-	// the same stdin, and two scanners would each buffer ahead and swallow the
-	// other's input.
-	stdin := bufio.NewScanner(os.Stdin)
-	stdin.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	stdin := newInput(os.Stdin, os.Stdout)
+	defer stdin.Close()
 
 	// Headless runs get NO approver. A prompt nobody can answer must not become
 	// silent permission, so -p denies what it would otherwise ask about and
@@ -289,7 +285,7 @@ func runOnce(ctx context.Context, h *harness.Harness, r *renderer, prompt string
 
 func runInteractive(
 	ctx context.Context, h *harness.Harness, r *renderer, s style,
-	in *bufio.Scanner, sig *interrupter,
+	in *input, sig *interrupter,
 ) error {
 	fmt.Printf("%s%s %s%s — %s, %s mode, workspace %s\n",
 		s.bold, harness.Name, harness.Version, s.reset, h.Model.Name,
@@ -299,17 +295,24 @@ func runInteractive(
 	}
 	fmt.Printf("%sType a prompt, or /help for commands. Ctrl-D to exit.%s\n\n", s.dim, s.reset)
 
+	// Only the REPL brackets pastes. A headless run never reaches here, and
+	// writing terminal modes it does not use would be output nobody asked for.
+	in.Bracket()
+
 	for {
 		fmt.Printf("%s>%s ", s.green, s.reset)
-		if !in.Scan() {
+		line, ok := in.Prompt()
+		if !ok {
 			fmt.Println()
 			return in.Err()
 		}
-		line := strings.TrimSpace(in.Text())
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		if strings.HasPrefix(line, "/") {
+		// A slash command is a single line by construction, so a pasted block
+		// that merely starts with "/" is a prompt, not a command.
+		if strings.HasPrefix(line, "/") && !strings.Contains(line, "\n") {
 			done, err := handleCommand(h, r, line, s)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%serror:%s %v\n", s.red, s.reset, err)

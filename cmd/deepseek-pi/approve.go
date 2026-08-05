@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,12 +19,12 @@ import (
 // waits, which is correct — a person can only answer one question at a time.
 type approver struct {
 	mu    sync.Mutex
-	in    *bufio.Scanner
+	in    *input
 	out   *os.File
 	style style
 }
 
-func newApprover(in *bufio.Scanner, out *os.File, s style) *approver {
+func newApprover(in *input, out *os.File, s style) *approver {
 	return &approver{in: in, out: out, style: s}
 }
 
@@ -58,11 +57,12 @@ func (a *approver) Ask(ctx context.Context, call agent.ToolCall, reason string) 
 	a.printf("%s[y] once  [a] always for %s  [n] no%s %s>%s ",
 		s.dim, call.Name, s.reset, s.yellow, s.reset)
 
-	if !a.in.Scan() {
+	line, ok := a.in.Line()
+	if !ok {
 		a.printf("\n")
 		return false, false
 	}
-	answer := strings.ToLower(strings.TrimSpace(a.in.Text()))
+	answer := strings.ToLower(strings.TrimSpace(line))
 	// Close the prompt line ourselves: when stdin is a pipe the terminal never
 	// echoes a newline, and the next output would run onto the question.
 	a.printf("\n")

@@ -153,6 +153,27 @@ counter to tune or get wrong. And a child is bounded by the **stricter** of its
 role and its parent, so an `implementer` under a `-plan` parent still cannot
 write; a mode another setting can escape is not a mode.
 
+## Pasting
+
+The REPL reads lines, so a pasted stack trace used to be one prompt per line:
+twenty API calls, nineteen of them fragments with no question attached. It now
+turns on **bracketed paste**, which is the only way a line-oriented reader can
+tell typing from pasting — the terminal wraps pasted text in `ESC[200~` and
+`ESC[201~`, and everything between them becomes a single prompt.
+
+Measured through a pty, pasting four lines: one request at 14331 input tokens,
+where the same paste previously cost four requests and 57509.
+
+The markers survive the terminal's cooked mode, so this needs no raw mode, no
+line editor and no second dependency. It does need one termios flag: with
+`ECHOCTL` set, the terminal echoes the markers back as a literal `^[[200~`
+around every paste, so the REPL clears that flag while it owns the terminal and
+restores it on exit. Verified by comparing the echoed bytes — `5e 5b` (a caret
+and a bracket, visible) before, `1b 5b` (a real escape, ignored) after.
+
+Line editing and history are still absent; those need raw mode and a real line
+editor, which is a larger thing than one flag.
+
 ## Budgets
 
 Sub-agents have always been bounded; the session itself was not. `-max-cost`
@@ -446,9 +467,9 @@ should stay that way.
 
 Early. The loop, tools, permissions, compaction, sessions, accounting and the
 eval harness, cache-break attribution, sub-agents, session branching, workspace
-checkpointing and session budgets work and are tested against the live API. Not
-yet built: readline-style input (a pasted block is still one turn per line), a
-scheduler and a full-screen TUI.
+checkpointing, session budgets and bracketed paste work and are tested against
+the live API. Not yet built: line editing and history in the REPL, a scheduler
+and a full-screen TUI.
 
 ## License
 

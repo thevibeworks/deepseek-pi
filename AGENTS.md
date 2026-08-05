@@ -134,6 +134,24 @@ report, and the two would drift the first time an accounting path changed.
 Raising a limit has to clear the recorded stop, or the raise does nothing and
 the next request is refused by the answer to the previous one.
 
+## The terminal
+
+`cmd/deepseek-pi/paste.go` owns stdin for the whole process. Keep it that way:
+the REPL and the approval prompt read the same descriptor, and two readers each
+buffer ahead and swallow the other's input.
+
+Bracketed paste is deliberately the *only* terminal mode we set. It needs no raw
+mode, because the markers survive cooked mode, and the one termios flag it does
+need — `ECHOCTL`, so the terminal does not echo those markers back as `^[[200~`
+— is restored on exit. Adding raw mode means owning a line editor and leaving a
+terminal unusable whenever the process dies badly; that is a project, not a
+flag.
+
+Verify terminal changes through a pty, not by reasoning about them. The unit
+tests here only prove the parser handles synthetic markers; whether the markers
+reach it at all, and what the user actually sees, is a question about the tty
+line discipline that only a pty answers. Compare the echoed bytes.
+
 ## The prompt cache
 
 `/cache` reports why the prefix cache missed and what it cost. It should say
