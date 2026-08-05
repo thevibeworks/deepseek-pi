@@ -14,13 +14,13 @@ of thousands: one wire protocol, one model family, no provider matrix.
 ```
 go install github.com/thevibeworks/deepseek-pi/cmd/deepseek-pi@latest
 export DEEPSEEK_API_KEY=sk-...
-deepseek-pi "there's an off-by-one in sum.go, fix it and verify"
+deepseek-pi                 # interactive; asks before it changes anything
 ```
 
 ## What it does
 
 ```
-$ deepseek-pi -p "buggy.go prints 9 but should print 10. Fix it and verify."
+$ deepseek-pi --yolo -p "buggy.go prints 9 but should print 10. Fix it and verify."
 read /tmp/demo/buggy.go
   ok 1  package main (+15 more lines)
 The bug: the loop starts at index 1 instead of 0, skipping the first element.
@@ -47,12 +47,55 @@ deepseek-pi -p "prompt"          run once and exit
 deepseek-pi "prompt"             same, positional
 deepseek-pi -c                   continue the most recent session here
 deepseek-pi -m pro -e high ...   pro model, high reasoning effort
+deepseek-pi -plan                read-only: investigate and propose
 deepseek-pi -sessions            list stored sessions
 deepseek-pi -show-prompt         print the assembled system prompt
 ```
 
-Slash commands in an interactive session: `/model`, `/effort`, `/status`,
-`/prompt`, `/session`, `/thinking`, `/clear`, `/exit`.
+Slash commands in an interactive session: `/mode`, `/model`, `/effort`,
+`/status`, `/prompt`, `/session`, `/thinking`, `/clear`, `/exit`.
+
+## Permissions
+
+Reading and read-only shell always run. Anything that can change the machine
+asks first:
+
+```
+edit wants to run:
+  main.go (1 change(s))
+    1. for i := 1; i < len(nums) -> for i := 0; i < len(nums)
+[y] once  [a] always for edit  [n] no >
+```
+
+Three modes:
+
+| mode | what runs |
+|---|---|
+| `default` | reads and read-only shell freely; asks before edit, write, or shell that can mutate |
+| `-plan` | read-only. Mutating tools are refused outright, with a message telling the model to describe the change instead |
+| `-yolo` | everything, no questions. For sandboxes, disposable checkouts, and CI that has accepted the blast radius |
+
+`--allow edit,write` (repeatable, or comma-separated) pre-approves specific
+tools. Plan mode ignores both `--allow` and remembered approvals — a mode that
+another setting can quietly override is not a mode.
+
+A headless run (`-p`) has nobody to ask, so **it refuses instead of assuming
+consent** and tells the model to say so. Pass `-yolo` or `--allow` to opt in.
+Reading and searching still work unprompted, so `deepseek-pi -p "what does this
+package do"` needs no flags at all.
+
+Whether shell is "read-only" is decided by a deliberately conservative
+classifier: the command is split on every chaining operator, each segment must
+lead with a program on a short allowlist, and any redirection, substitution,
+backgrounding, inline assignment, or path-qualified program disqualifies the
+whole command. Unknown means unsafe. `rg foo | head` runs; `rg foo > out` asks.
+Its failure mode should be an unnecessary question, never an unintended write —
+`TestBashClassifierRejectsBypasses` is the adversarial pass over that.
+
+Skills are progressive-disclosure: only a one-line index sits in the cached
+prefix, and a body is read on the turn it is needed. A large personal
+collection can still dominate the prompt — `/status` reports what the index
+costs, and `-no-skills` turns discovery off.
 
 Configuration is environment only — `DEEPSEEK_API_KEY` (required),
 `DEEPSEEK_PI_HOME` (session storage, default `~/.deepseek-pi`), `NO_COLOR`.
@@ -163,9 +206,10 @@ should stay that way.
 
 ## Status
 
-Early. The loop, tools, sessions and accounting work and are tested against the
-live API. Not yet built: context compaction, sub-agents, a scheduler, and a
-full-screen TUI.
+Early. The loop, tools, permissions, sessions and accounting work and are
+tested against the live API. Not yet built: context compaction (a session
+currently ends at the context limit), sub-agents, an eval harness, a scheduler,
+and a full-screen TUI.
 
 ## License
 

@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/thevibeworks/deepseek-pi/agent"
 	"github.com/thevibeworks/deepseek-pi/ai"
 	"github.com/thevibeworks/deepseek-pi/harness"
 )
@@ -36,6 +37,9 @@ type flags struct {
 	continueRun bool
 	maxTokens   int
 	yolo        bool
+	plan        bool
+	noSkills    bool
+	allow       listFlag
 	quiet       bool
 	thinking    bool
 	showPrompt  bool
@@ -55,7 +59,10 @@ func parseFlags() *flags {
 	flag.StringVar(&f.resume, "r", "", "resume a session by file path")
 	flag.BoolVar(&f.continueRun, "c", false, "continue the most recent session in this workspace")
 	flag.IntVar(&f.maxTokens, "max-tokens", 0, "cap output tokens per turn")
-	flag.BoolVar(&f.yolo, "yolo", false, "skip tool approval prompts")
+	flag.BoolVar(&f.yolo, "yolo", false, "run every tool without asking (sandboxes and CI)")
+	flag.BoolVar(&f.plan, "plan", false, "read-only: investigate and propose, never modify")
+	flag.BoolVar(&f.noSkills, "no-skills", false, "skip skill discovery, for a minimal prompt prefix")
+	flag.Var(&f.allow, "allow", "tool to pre-approve; repeatable or comma-separated (edit,write)")
 	flag.BoolVar(&f.quiet, "q", false, "print only the final answer")
 	flag.BoolVar(&f.thinking, "show-thinking", false, "stream reasoning as it arrives")
 	flag.BoolVar(&f.showPrompt, "show-prompt", false, "print the assembled system prompt and exit")
@@ -81,6 +88,11 @@ Usage:
   deepseek-pi -p "fix the build"   run one prompt and exit
   deepseek-pi "fix the build"      same, positional form
   deepseek-pi -c                   continue the most recent session here
+
+Permissions:
+  Reading and read-only shell always run. Anything that can change the
+  machine asks first in an interactive session. A headless run (-p) has
+  nobody to ask, so it refuses instead — pass -yolo or -allow to opt in.
 
 Flags:
 `, harness.Name, harness.Version)
@@ -125,12 +137,37 @@ func run() error {
 		resume = latest
 	}
 
+	mode, err := resolveMode(f)
+	if err != nil {
+		return err
+	}
+
+	s := newStyle(colorEnabled(os.Stdout))
+
+	// One scanner for the whole process: the REPL and the approval prompt read
+	// the same stdin, and two scanners would each buffer ahead and swallow the
+	// other's input.
+	stdin := bufio.NewScanner(os.Stdin)
+	stdin.Buffer(make([]byte, 0, 64*1024), 1<<20)
+
+	// Headless runs get NO approver. A prompt nobody can answer must not become
+	// silent permission, so -p denies what it would otherwise ask about and
+	// says how to opt in.
+	var ask func(context.Context, agent.ToolCall, string) (bool, bool)
+	if f.prompt == "" {
+		ask = newApprover(stdin, os.Stdout, s).Ask
+	}
+
 	h, err := harness.New(ctx, harness.Options{
-		Cwd:       f.cwd,
-		Model:     normalizeModel(f.model),
-		Effort:    ai.Effort(f.effort),
-		MaxTokens: f.maxTokens,
-		Resume:    resume,
+		Cwd:        f.cwd,
+		Model:      normalizeModel(f.model),
+		Effort:     ai.Effort(f.effort),
+		MaxTokens:  f.maxTokens,
+		Resume:     resume,
+		NoSkills:   f.noSkills,
+		Mode:       mode,
+		AllowTools: f.allow,
+		Approve:    ask,
 	})
 	if err != nil {
 		return err
@@ -142,7 +179,6 @@ func run() error {
 		return nil
 	}
 
-	s := newStyle(colorEnabled(os.Stdout))
 	r := newRenderer(os.Stdout, s)
 	r.Quiet = f.quiet
 	r.ShowThinking = f.thinking
@@ -151,7 +187,38 @@ func run() error {
 	if f.prompt != "" {
 		return runOnce(ctx, h, r, f.prompt, s)
 	}
-	return runInteractive(ctx, h, r, s)
+	return runInteractive(ctx, h, r, s, stdin)
+}
+
+// resolveMode turns the mode flags into one posture, rejecting combinations
+// that contradict each other rather than silently picking a winner.
+func resolveMode(f *flags) (harness.Mode, error) {
+	if f.yolo && f.plan {
+		return "", fmt.Errorf("-yolo and -plan are opposites; pick one")
+	}
+	switch {
+	case f.yolo:
+		return harness.ModeYolo, nil
+	case f.plan:
+		return harness.ModePlan, nil
+	}
+	return harness.ModeDefault, nil
+}
+
+// listFlag accumulates a repeatable flag that also accepts comma-separated
+// values, so --allow edit --allow write and --allow edit,write both work. A
+// user guessing either form should not have to discover which one we chose.
+type listFlag []string
+
+func (l *listFlag) String() string { return strings.Join(*l, ",") }
+
+func (l *listFlag) Set(v string) error {
+	for _, part := range strings.Split(v, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			*l = append(*l, part)
+		}
+	}
+	return nil
 }
 
 func normalizeModel(m string) string {
@@ -179,16 +246,14 @@ func runOnce(ctx context.Context, h *harness.Harness, r *renderer, prompt string
 	return ctx.Err()
 }
 
-func runInteractive(ctx context.Context, h *harness.Harness, r *renderer, s style) error {
-	fmt.Printf("%s%s %s%s — %s, workspace %s\n",
-		s.bold, harness.Name, harness.Version, s.reset, h.Model.Name, h.Workspace.Root)
+func runInteractive(ctx context.Context, h *harness.Harness, r *renderer, s style, in *bufio.Scanner) error {
+	fmt.Printf("%s%s %s%s — %s, %s mode, workspace %s\n",
+		s.bold, harness.Name, harness.Version, s.reset, h.Model.Name,
+		h.Policy.Mode, h.Workspace.Root)
 	if n := len(h.Skills); n > 0 {
 		fmt.Printf("%s%d skill(s) available%s\n", s.dim, n, s.reset)
 	}
 	fmt.Printf("%sType a prompt, or /help for commands. Ctrl-D to exit.%s\n\n", s.dim, s.reset)
-
-	in := bufio.NewScanner(os.Stdin)
-	in.Buffer(make([]byte, 0, 64*1024), 1<<20)
 
 	for {
 		fmt.Printf("%s>%s ", s.green, s.reset)
@@ -240,6 +305,8 @@ func handleCommand(h *harness.Harness, r *renderer, line string, s style) (bool,
 	switch cmd {
 	case "help", "?":
 		fmt.Print(`Commands:
+  /mode [default|plan|yolo]
+                       show or change what tools may run without asking
   /model [flash|pro]   show or change the model for the next turn
   /effort [off|low|high|xhigh|max]
                        show or change the reasoning level
@@ -252,6 +319,21 @@ func handleCommand(h *harness.Harness, r *renderer, line string, s style) (bool,
 `)
 	case "exit", "quit", "q":
 		return true, nil
+
+	case "mode":
+		if arg == "" {
+			fmt.Printf("%s\n", h.Policy.Mode)
+			return false, nil
+		}
+		m, err := harness.ParseMode(arg)
+		if err != nil {
+			return false, err
+		}
+		// Only the permission changes; the tool set and therefore the cached
+		// prompt prefix stay byte-identical, so switching modes mid-session
+		// costs nothing.
+		h.Policy.Mode = m
+		fmt.Printf("mode: %s\n", m)
 
 	case "model":
 		if arg == "" {
@@ -337,6 +419,7 @@ func printStatus(h *harness.Harness, s style) {
 
 	fmt.Printf("%smodel%s        %s (%s)\n", s.bold, s.reset, h.Model.Name, h.Model.ID)
 	fmt.Printf("%seffort%s       %s\n", s.bold, s.reset, effort)
+	fmt.Printf("%smode%s         %s\n", s.bold, s.reset, h.Policy.Mode)
 	fmt.Printf("%sworkspace%s    %s\n", s.bold, s.reset, h.Workspace.Root)
 	fmt.Printf("%ssession%s      %s\n", s.bold, s.reset, h.Session.Path())
 	fmt.Printf("%smessages%s     %d\n", s.bold, s.reset, len(h.Agent.Context().Messages))
@@ -360,7 +443,13 @@ func printStatus(h *harness.Harness, s style) {
 		}
 	}
 	if len(h.Skills) > 0 {
-		fmt.Printf("%sskills%s       %d\n", s.bold, s.reset, len(h.Skills))
+		// Show what the index costs. Skills are progressive-disclosure, so only
+		// this index sits in the prefix — but with a large personal collection
+		// it can still be most of the prompt, and that should not be a mystery.
+		index := harness.FormatSkills(h.Skills)
+		fmt.Printf("%sskills%s       %d (index %s, %.0f%% of the prompt)\n",
+			s.bold, s.reset, len(h.Skills), formatBytes(len(index)),
+			float64(len(index))/float64(len(h.SystemPrompt()))*100)
 	}
 }
 

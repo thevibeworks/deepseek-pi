@@ -31,8 +31,23 @@ type Options struct {
 	AppendSystemPrompt string
 	// Resume loads a prior transcript from this session file.
 	Resume string
-	// ApproveTool gates every tool call. Nil allows everything.
-	ApproveTool func(context.Context, agent.ToolCall, *agent.Context) agent.BeforeToolResult
+
+	// NoSkills disables skill discovery. Skills are cheap per turn once cached,
+	// but a large personal collection dominates the prompt, and someone who
+	// wants a minimal prefix should be able to say so.
+	NoSkills bool
+
+	// Mode is the permission posture. Empty means ModeDefault.
+	Mode Mode
+	// AllowTools pre-approves tool names for the session.
+	AllowTools []string
+	// Approve is called when the policy says Ask. It returns whether to run the
+	// call, and whether to remember that answer for the rest of the session.
+	//
+	// Nil means NO USER IS PRESENT, and Ask becomes a denial. That is the
+	// correct default for headless runs: a prompt nobody can answer must not
+	// silently become permission.
+	Approve func(ctx context.Context, call agent.ToolCall, reason string) (allow, remember bool)
 }
 
 // Harness is a fully assembled coding agent.
@@ -42,6 +57,10 @@ type Harness struct {
 	Client    *ai.Client
 	Workspace *tools.Workspace
 	Model     ai.Model
+
+	// Policy governs tool permissions. Exposed so a UI can switch modes
+	// mid-session without rebuilding the harness.
+	Policy *Policy
 
 	// Skills and Instructions are exposed for status output.
 	Skills       []Skill
@@ -105,7 +124,10 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 	}
 
 	instructions := DiscoverInstructions(cwd)
-	skills := DiscoverSkills(cwd)
+	var skills []Skill
+	if !opts.NoSkills {
+		skills = DiscoverSkills(cwd)
+	}
 
 	systemPrompt := BuildSystemPrompt(PromptConfig{
 		Cwd:                 cwd,
@@ -139,17 +161,20 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 		Tools:        toolSet,
 	}
 
+	mode := opts.Mode
+	if mode == "" {
+		mode = ModeDefault
+	}
+	policy := NewPolicy(mode, opts.AllowTools)
+
 	cfg := agent.LoopConfig{
 		Model:         model.ID,
 		Effort:        opts.Effort,
 		MaxTokens:     opts.MaxTokens,
 		SessionID:     sessionID,
 		ToolExecution: agent.ModeParallel,
-		BeforeToolCall: func(c context.Context, call agent.ToolCall, actx *agent.Context) agent.BeforeToolResult {
-			if opts.ApproveTool == nil {
-				return agent.BeforeToolResult{}
-			}
-			return opts.ApproveTool(c, call, actx)
+		BeforeToolCall: func(c context.Context, call agent.ToolCall, _ *agent.Context) agent.BeforeToolResult {
+			return approve(c, policy, opts.Approve, call)
 		},
 	}
 
@@ -157,7 +182,7 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 
 	h := &Harness{
 		Agent: a, Session: session, Client: client,
-		Workspace: ws, Model: model,
+		Workspace: ws, Model: model, Policy: policy,
 		Skills: skills, Instructions: instructions,
 	}
 
@@ -173,6 +198,49 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 	})
 
 	return h, nil
+}
+
+// approve turns a policy decision into a loop-level block or pass.
+//
+// The refusal text goes back to the model as a tool result, so it always says
+// what to do next. A bare "denied" produces an identical retry, which costs a
+// full round trip and breaks the prompt cache for nothing.
+func approve(
+	ctx context.Context,
+	policy *Policy,
+	ask func(context.Context, agent.ToolCall, string) (bool, bool),
+	call agent.ToolCall,
+) agent.BeforeToolResult {
+	decision, reason := policy.Decide(call)
+	switch decision {
+	case Allow:
+		return agent.BeforeToolResult{}
+	case Deny:
+		return agent.BeforeToolResult{Block: true, Reason: reason}
+	}
+
+	// Ask with nobody to ask is a denial, not an approval.
+	if ask == nil {
+		detail := ""
+		if reason != "" {
+			detail = " (" + reason + ")"
+		}
+		return agent.BeforeToolResult{Block: true, Reason: fmt.Sprintf(
+			"Refused: %s needs approval%s and this is a non-interactive run. "+
+				"Tell the user to re-run with --yolo, or with --allow %s to permit this tool.",
+			call.Name, detail, call.Name)}
+	}
+
+	allow, remember := ask(ctx, call, reason)
+	if !allow {
+		return agent.BeforeToolResult{Block: true, Reason: fmt.Sprintf(
+			"The user declined to run %s. Do not retry it; "+
+				"either take a different approach or ask what they would prefer.", call.Name)}
+	}
+	if remember {
+		policy.Remember(call.Name)
+	}
+	return agent.BeforeToolResult{}
 }
 
 // zeroUsage clears usage on a resumed transcript.
