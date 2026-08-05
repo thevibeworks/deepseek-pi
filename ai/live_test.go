@@ -8,15 +8,27 @@ import (
 	"time"
 )
 
-// liveClient skips the test unless a real key is present. These tests spend
-// money, so they are opt-in via DEEPSEEK_API_KEY and kept few and cheap.
-func liveClient(t *testing.T) *Client {
+// requireLive gates the tests that hit the real API.
+//
+// A key alone is NOT enough. Developers keep DEEPSEEK_API_KEY exported for
+// ordinary use, and a plain `go test ./...` silently spending money is a bad
+// surprise. DEEPSEEK_PI_LIVE=1 is the deliberate opt-in; `make test-live` sets
+// it. The tests still compile on every run, so they cannot rot.
+func requireLive(t *testing.T) string {
 	t.Helper()
+	if os.Getenv("DEEPSEEK_PI_LIVE") == "" {
+		t.Skip("set DEEPSEEK_PI_LIVE=1 to run tests against the real API (they cost money)")
+	}
 	key := os.Getenv("DEEPSEEK_API_KEY")
 	if key == "" {
 		t.Skip("DEEPSEEK_API_KEY not set; skipping live API test")
 	}
-	return NewClient(key)
+	return key
+}
+
+func liveClient(t *testing.T) *Client {
+	t.Helper()
+	return NewClient(requireLive(t))
 }
 
 func TestLiveStreamText(t *testing.T) {
@@ -140,9 +152,7 @@ func countThinking(m Message) int {
 }
 
 func TestLiveBadKeyIsStreamError(t *testing.T) {
-	if os.Getenv("DEEPSEEK_API_KEY") == "" {
-		t.Skip("DEEPSEEK_API_KEY not set; skipping live API test")
-	}
+	requireLive(t)
 	c := NewClient("sk-obviously-invalid")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

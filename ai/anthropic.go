@@ -168,6 +168,12 @@ type wireStreamEvent struct {
 //  3. Consecutive tool results collapse into ONE user message. The Messages API
 //     requires that; emitting one user message per result is the single most
 //     common way a parallel tool batch gets rejected.
+//  4. A tool result whose CALL is absent is dropped. This is the mirror of
+//     rule 2 and the API is equally strict about it:
+//     "Each tool_result block must have a corresponding tool_use block in the
+//     previous message." A transcript can acquire one by being truncated or
+//     rewritten above us, and dropping the stray block sends a request that
+//     works instead of one that is rejected whole.
 func encodeMessages(msgs []Message) []wireMessage {
 	out := make([]wireMessage, 0, len(msgs))
 
@@ -179,6 +185,11 @@ func encodeMessages(msgs []Message) []wireMessage {
 			answered[m.ToolCallID] = true
 		}
 	}
+
+	// Call ids seen so far, so a result can check that its call survives. This
+	// is built as we walk rather than up front, because a result must follow
+	// its call, not merely coexist with it.
+	issued := make(map[string]bool, len(msgs))
 
 	flushResults := func(pending []wireBlock) []wireBlock {
 		if len(pending) > 0 {
@@ -241,6 +252,7 @@ func encodeMessages(msgs []Message) []wireMessage {
 					blocks = append(blocks, wireBlock{
 						Type: "tool_use", ID: c.ID, Name: c.Name, Input: input,
 					})
+					issued[c.ID] = true
 					// Rule 2: synthesize a result for anything unanswered.
 					if !answered[c.ID] {
 						missing = append(missing, wireBlock{
@@ -261,6 +273,11 @@ func encodeMessages(msgs []Message) []wireMessage {
 			}
 
 		case RoleToolResult:
+			// Rule 4: a result whose call never made it into the payload has
+			// nothing to attach to, and sending it fails the whole request.
+			if !issued[m.ToolCallID] {
+				continue
+			}
 			// Rule 3: accumulate; a run of results becomes one user message.
 			pendingResults = append(pendingResults, wireBlock{
 				Type:      "tool_result",

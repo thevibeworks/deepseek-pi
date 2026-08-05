@@ -62,6 +62,10 @@ type Harness struct {
 	// mid-session without rebuilding the harness.
 	Policy *Policy
 
+	// Compactor keeps the session inside the context window. Exposed so a UI
+	// can report compactions and force one on demand.
+	Compactor *Compactor
+
 	// Skills and Instructions are exposed for status output.
 	Skills       []Skill
 	Instructions []InstructionFile
@@ -167,12 +171,21 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 	}
 	policy := NewPolicy(mode, opts.AllowTools)
 
+	// The compactor shares the parent system prompt so its summarization
+	// request lands on the same cached prefix instead of paying full input
+	// rate for a second one.
+	compactor := NewCompactor(model, client.StreamFunc(ctx), systemPrompt)
+
 	cfg := agent.LoopConfig{
 		Model:         model.ID,
 		Effort:        opts.Effort,
 		MaxTokens:     opts.MaxTokens,
 		SessionID:     sessionID,
 		ToolExecution: agent.ModeParallel,
+		// Compaction runs from the between-turns seam because that is the only
+		// safe point: mid-turn the transcript holds an assistant message whose
+		// tool calls are still unanswered, and rewriting there orphans them.
+		PrepareNextTurn: compactor.PrepareNextTurn,
 		BeforeToolCall: func(c context.Context, call agent.ToolCall, _ *agent.Context) agent.BeforeToolResult {
 			return approve(c, policy, opts.Approve, call)
 		},
@@ -182,8 +195,14 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 
 	h := &Harness{
 		Agent: a, Session: session, Client: client,
-		Workspace: ws, Model: model, Policy: policy,
+		Workspace: ws, Model: model, Policy: policy, Compactor: compactor,
 		Skills: skills, Instructions: instructions,
+	}
+
+	compactor.OnEvent = func(ev CompactionEvent) {
+		if err := session.RecordCompaction(ev); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not record compaction: %v\n", err)
+		}
 	}
 
 	// Persist every finalized message. Streaming partials are skipped: only

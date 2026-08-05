@@ -184,6 +184,19 @@ func run() error {
 	r.ShowThinking = f.thinking
 	h.Agent.Subscribe(r.Handle)
 
+	// Compaction is not a silent event. It changes what the model can see, so
+	// a user watching a long session should be told when their earlier
+	// conversation stopped being verbatim.
+	record := h.Compactor.OnEvent
+	h.Compactor.OnEvent = func(ev harness.CompactionEvent) {
+		if record != nil {
+			record(ev)
+		}
+		if !f.quiet {
+			fmt.Fprintln(os.Stderr, formatCompaction(ev, s))
+		}
+	}
+
 	if f.prompt != "" {
 		return runOnce(ctx, h, r, f.prompt, s)
 	}
@@ -310,6 +323,7 @@ func handleCommand(h *harness.Harness, r *renderer, line string, s style) (bool,
   /model [flash|pro]   show or change the model for the next turn
   /effort [off|low|high|xhigh|max]
                        show or change the reasoning level
+  /compact             summarize earlier turns now, freeing context
   /status              session accounting and configuration
   /prompt              print the assembled system prompt
   /session             path to this session's transcript
@@ -380,6 +394,17 @@ func handleCommand(h *harness.Harness, r *renderer, line string, s style) (bool,
 		h.Agent.SetEffort(e)
 		fmt.Printf("effort: %s\n", e)
 
+	case "compact":
+		actx := h.Agent.Context()
+		before := harness.EstimateTokens(actx.Messages)
+		update := h.Compactor.Compact(actx, "requested with /compact")
+		if update == nil {
+			fmt.Printf("%snothing to compact (%d tokens, %d messages)%s\n",
+				s.dim, before, len(actx.Messages), s.reset)
+			return false, nil
+		}
+		actx.Messages = update.Context.Messages
+
 	case "status":
 		printStatus(h, s)
 
@@ -428,9 +453,11 @@ func printStatus(h *harness.Harness, s style) {
 	// Context usage is measured against the REAL window, not the advertised
 	// one. Budgeting against 1M when 616k is usable is how a harness hits hard
 	// truncation while reporting 62% utilisation.
-	pct := float64(u.Input) / float64(h.Model.ContextWindow) * 100
+	live := harness.EstimateTokens(h.Agent.Context().Messages)
+	pct := float64(live) / float64(h.Model.ContextWindow) * 100
 	fmt.Printf("%scontext%s      %d / %d tokens (%.1f%% of the usable window; %d advertised)\n",
-		s.bold, s.reset, u.Input, h.Model.ContextWindow, pct, h.Model.AdvertisedWindow)
+		s.bold, s.reset, live, h.Model.ContextWindow, pct, h.Model.AdvertisedWindow)
+	fmt.Printf("%scompact at%s   %d tokens\n", s.bold, s.reset, h.Compactor.Threshold())
 	fmt.Printf("%stokens%s       %d in / %d out · cache read %d (%.0f%%)\n",
 		s.bold, s.reset, u.Input, u.Output, u.CacheRead, u.CacheHitRate()*100)
 	fmt.Printf("%scost%s         $%.4f (cache saved $%.4f)\n",

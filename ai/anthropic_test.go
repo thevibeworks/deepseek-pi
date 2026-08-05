@@ -363,3 +363,56 @@ func TestDefaultTransportRetryIsZero(t *testing.T) {
 		t.Errorf("default transport MaxRetries = %d, want 0", got)
 	}
 }
+
+func TestEncodeMessagesDropsOrphanedToolResults(t *testing.T) {
+	// The mirror of the orphaned-call rule, and the API is just as strict:
+	// "Each tool_result block must have a corresponding tool_use block in the
+	// previous message." A transcript can acquire a stray result by being
+	// truncated or rewritten above this layer — compaction is the obvious
+	// source — and one stray block fails the ENTIRE request, not just itself.
+	msgs := []Message{
+		UserMessage("go"),
+		// A result whose call is nowhere in the transcript.
+		toolResult("ghost", "output from a call that was cut away"),
+		assistant(StopToolUse, toolCall("real", "t", `{}`)),
+		toolResult("real", "genuine output"),
+	}
+	got := encodeMessages(msgs)
+
+	for _, m := range got {
+		for _, b := range m.Content {
+			if b.Type == "tool_result" && b.ToolUseID == "ghost" {
+				t.Error("orphaned tool result was sent; the API rejects the whole request")
+			}
+		}
+	}
+	// The legitimate pair must survive untouched.
+	var foundReal bool
+	for _, m := range got {
+		for _, b := range m.Content {
+			if b.Type == "tool_result" && b.ToolUseID == "real" {
+				foundReal = true
+			}
+		}
+	}
+	if !foundReal {
+		t.Error("dropping the orphan also dropped a valid tool result")
+	}
+}
+
+func TestEncodeMessagesDropsResultThatPrecedesItsCall(t *testing.T) {
+	// Ordering matters, not just presence: a result must FOLLOW its call.
+	msgs := []Message{
+		UserMessage("go"),
+		toolResult("x", "early"),
+		assistant(StopToolUse, toolCall("x", "t", `{}`)),
+	}
+	got := encodeMessages(msgs)
+	for _, m := range got {
+		for _, b := range m.Content {
+			if b.Type == "tool_result" {
+				t.Errorf("a result appearing before its call was sent: %+v", b)
+			}
+		}
+	}
+}

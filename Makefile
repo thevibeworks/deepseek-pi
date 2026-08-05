@@ -24,8 +24,8 @@ test-race: ## Unit tests under the race detector
 	go test -race ./...
 
 .PHONY: test-live
-test-live: ## Tests that hit the real API; needs DEEPSEEK_API_KEY
-	go test ./ai/ -run TestLive -v -count=1
+test-live: ## Tests that hit the real API; needs DEEPSEEK_API_KEY. Costs a few cents.
+	DEEPSEEK_PI_LIVE=1 go test ./... -run TestLive -v -count=1
 
 .PHONY: cover
 cover: ## Coverage report

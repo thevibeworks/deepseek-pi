@@ -10,6 +10,7 @@ import (
 
 	"github.com/thevibeworks/deepseek-pi/agent"
 	"github.com/thevibeworks/deepseek-pi/ai"
+	"github.com/thevibeworks/deepseek-pi/harness"
 	"github.com/thevibeworks/deepseek-pi/tools"
 )
 
@@ -250,3 +251,22 @@ func formatUsage(model ai.Model, u ai.Usage, s style) string {
 
 // formatBytes is re-exported for status output.
 func formatBytes(n int) string { return tools.FormatSize(n) }
+
+// formatCompaction renders a compaction for the user.
+//
+// It reports both numbers because they answer different questions: how much
+// room was freed, and whether a model call was spent doing it.
+func formatCompaction(ev harness.CompactionEvent, s style) string {
+	how := "reclaimed"
+	if ev.UsedLLM {
+		how = "summarized"
+	} else if ev.Summarized > 0 {
+		how = "summarized without a model call"
+	}
+	line := fmt.Sprintf("%scompacted context: %d -> %d tokens (%s)%s",
+		s.dim, ev.BeforeToken, ev.AfterToken, how, s.reset)
+	if ev.Err != nil {
+		line += fmt.Sprintf("\n%swarning: %v%s", s.yellow, ev.Err, s.reset)
+	}
+	return line
+}

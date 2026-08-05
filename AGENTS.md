@@ -32,12 +32,39 @@ usable one.
 `PromptGuidelines` on the tool definition; the prompt is assembled from them.
 Never hand-maintain a tool list in `harness/prompt.go`.
 
+**Compaction must terminate.** Clear provider usage from any message that
+survives compaction. `Usage.Input` describes the prompt *before* the head was
+dropped, and `EstimateTokens` anchors on the newest such figure — leave it and
+the estimate never falls, so every following turn compacts again while the
+transcript stops shrinking. `TestCompactionTerminates` guards this. Resume has
+the same hazard and the same fix.
+
+**Never cut a transcript where a tool result would lose its call.** The API
+rejects a `tool_result` without a preceding `tool_use` outright. Cut only where
+a real user message begins; retaining more than the budget is fine, retaining
+an orphan is a dead session.
+
 **A stream function never returns an error.** Failures are a final assistant
 message with `StopError`. This is what keeps the loop to one failure path.
 
 **Tools return an error to fail.** Do not encode failure inside a successful
 result; the model reacts to the error flag and routinely misses failure text
 buried in output.
+
+## Changing permissions
+
+`harness/permission.go` gates every tool call. Two things are load-bearing:
+
+- The order inside `Policy.Decide`. Plan mode is checked before the allow-list
+  and before remembered approvals. A mode another setting can override is not a
+  mode.
+- `classifyBash` fails toward asking. If you add to `safeCommands`, the
+  question is not "is this usually safe" but "can this write, execute
+  arbitrary text, or be chained into something that can". Add an adversarial
+  case to `TestBashClassifierRejectsBypasses` for anything you are unsure of.
+
+New tools that can change the machine must be added to `mutatingTools` in the
+same commit. Nothing else classifies them.
 
 ## Changing the loop
 

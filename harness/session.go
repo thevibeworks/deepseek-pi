@@ -24,6 +24,10 @@ const (
 	EntryMessage EntryKind = "message"
 	// EntryModelChange records a model switch.
 	EntryModelChange EntryKind = "model_change"
+	// EntryCompaction records that the context view was compacted. Storage
+	// keeps every message; only the view the model sees shrinks, so this marks
+	// where that divergence happened.
+	EntryCompaction EntryKind = "compaction"
 )
 
 // Entry is one JSONL line.
@@ -39,6 +43,13 @@ type Entry struct {
 	Version   int    `json:"version,omitempty"`
 	// Parent links a forked session to the one it branched from.
 	Parent string `json:"parent,omitempty"`
+
+	// Compaction fields.
+	BeforeTokens int    `json:"beforeTokens,omitempty"`
+	AfterTokens  int    `json:"afterTokens,omitempty"`
+	Reclaimed    int    `json:"reclaimedBytes,omitempty"`
+	UsedLLM      bool   `json:"usedLlm,omitempty"`
+	Note         string `json:"note,omitempty"`
 }
 
 // SessionVersion is the on-disk format version.
@@ -174,6 +185,28 @@ func (s *Session) RecordModelChange(model string) error {
 	}
 	return s.writeEntry(Entry{
 		Kind: EntryModelChange, Timestamp: time.Now().UnixMilli(), Model: model,
+	})
+}
+
+// RecordCompaction notes a compaction in the transcript.
+//
+// Compaction shrinks the CONTEXT VIEW, never storage: every message stays on
+// disk. This entry is what lets a later reader tell the difference between
+// "the model never saw this" and "the model saw it and then it aged out".
+func (s *Session) RecordCompaction(ev CompactionEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureFile(); err != nil {
+		return err
+	}
+	note := ""
+	if ev.Err != nil {
+		note = "summarization failed, used the deterministic fallback: " + ev.Err.Error()
+	}
+	return s.writeEntry(Entry{
+		Kind: EntryCompaction, Timestamp: time.Now().UnixMilli(),
+		BeforeTokens: ev.BeforeToken, AfterTokens: ev.AfterToken,
+		Reclaimed: ev.Reclaimed, UsedLLM: ev.UsedLLM, Note: note,
 	})
 }
 

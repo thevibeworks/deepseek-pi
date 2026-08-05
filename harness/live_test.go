@@ -1,0 +1,168 @@
+package harness
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/thevibeworks/deepseek-pi/ai"
+)
+
+// requireLive gates the tests that hit the real API. A key alone is not
+// enough: see the note in ai/live_test.go.
+func requireLive(t *testing.T) {
+	t.Helper()
+	if os.Getenv("DEEPSEEK_PI_LIVE") == "" {
+		t.Skip("set DEEPSEEK_PI_LIVE=1 to run tests against the real API (they cost money)")
+	}
+	if os.Getenv("DEEPSEEK_API_KEY") == "" {
+		t.Skip("DEEPSEEK_API_KEY not set; skipping live API test")
+	}
+}
+
+func liveWorkspace(t *testing.T) string {
+	t.Helper()
+	requireLive(t)
+	dir := t.TempDir()
+	t.Setenv("DEEPSEEK_PI_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir()) // no personal skills in the prompt
+
+	files := map[string]string{
+		"alpha.go": "package demo\n\n// AlphaSecret is 4711.\nconst AlphaSecret = 4711\n",
+		"beta.go":  "package demo\n\n// BetaSecret is 1337.\nconst BetaSecret = 1337\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// TestLiveSummarizationProducesUsableSummary checks the summarization prompt
+// against the real model. A summary that omits what was asked for or what was
+// done is worse than useless: it silently replaces the transcript.
+func TestLiveSummarizationProducesUsableSummary(t *testing.T) {
+	requireLive(t)
+	client := ai.NewClient(os.Getenv("DEEPSEEK_API_KEY"))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	model := ai.MustLookup(ai.ModelFlash)
+	c := NewCompactor(model, client.StreamFunc(ctx), "You are a coding agent.")
+
+	// A well-formed transcript: every tool result follows its call, because
+	// that is what the real cut point guarantees and what the API demands.
+	head := []ai.Message{
+		ai.UserMessage("Rename the function Frobnicate to Process across the repo, and keep the tests passing."),
+		assistantWith(readCall("c1", "frob.go")),
+		readResult("c1", "1\tpackage main\n2\tfunc Frobnicate() {}\n"),
+		assistantWith(ai.Content{
+			Type: ai.ContentToolCall, ID: "c2", Name: "edit",
+			Arguments: []byte(`{"path":"frob.go","edits":[{"oldText":"Frobnicate","newText":"Process"}]}`),
+		}),
+		{Role: ai.RoleToolResult, ToolName: "edit", ToolCallID: "c2",
+			Content: []ai.Content{ai.TextContent("Applied 1 edit(s) to frob.go (1 line(s) changed).")}},
+		assistantWith(ai.Content{
+			Type: ai.ContentToolCall, ID: "c3", Name: "bash",
+			Arguments: []byte(`{"command":"go test ./..."}`),
+		}),
+		{Role: ai.RoleToolResult, ToolName: "bash", ToolCallID: "c3", IsError: true,
+			Content: []ai.Content{ai.TextContent("FAIL demo [build failed]\nfrob_test.go:9: undefined: Frobnicate")}},
+		ai.UserMessage("the test file still refers to the old name"),
+	}
+
+	summary, usedLLM, err := c.renderSummary(ctx, head, "")
+	if err != nil {
+		t.Fatalf("renderSummary: %v", err)
+	}
+	if !usedLLM {
+		t.Fatal("fell back to the deterministic summary despite a working client")
+	}
+	t.Logf("summary:\n%s", summary)
+
+	// The summary must carry the task, the change made, and the outstanding
+	// failure. Those three are what let another turn continue the work.
+	lower := strings.ToLower(summary)
+	for _, want := range []string{"frobnicate", "process", "frob.go", "test"} {
+		if !strings.Contains(lower, want) {
+			t.Errorf("summary omits %q, which a continuation would need:\n%s", want, summary)
+		}
+	}
+	if len(summary) > 4000 {
+		t.Errorf("summary is %d bytes; it is meant to be smaller than what it replaces", len(summary))
+	}
+}
+
+// TestLiveCompactionKeepsSessionWorking is the end-to-end check: force
+// compaction mid-session and confirm the agent still answers correctly using
+// information that only existed before the cut.
+func TestLiveCompactionKeepsSessionWorking(t *testing.T) {
+	dir := liveWorkspace(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+
+	h, err := New(ctx, Options{Cwd: dir, Mode: ModeYolo, NoSkills: true})
+	if err != nil {
+		t.Fatalf("harness: %v", err)
+	}
+	defer func() { _ = h.Close() }()
+
+	var events []CompactionEvent
+	record := h.Compactor.OnEvent
+	h.Compactor.OnEvent = func(ev CompactionEvent) {
+		if record != nil {
+			record(ev)
+		}
+		events = append(events, ev)
+	}
+	// Trigger almost immediately so compaction is exercised without generating
+	// half a million tokens of filler.
+	h.Compactor.Trigger = 0.002 // ~1.2k tokens
+	h.Compactor.RetainTail = 400
+
+	if _, err := h.Agent.Prompt(ctx, "Read alpha.go and tell me the value of AlphaSecret. Just the number."); err != nil {
+		t.Fatalf("turn 1: %v", err)
+	}
+	if _, err := h.Agent.Prompt(ctx, "Now read beta.go and tell me BetaSecret. Just the number."); err != nil {
+		t.Fatalf("turn 2: %v", err)
+	}
+
+	if len(events) == 0 {
+		t.Fatalf("compaction never fired; estimate is %d, threshold %d",
+			EstimateTokens(h.Agent.Context().Messages), h.Compactor.Threshold())
+	}
+	for _, ev := range events {
+		if ev.Err != nil {
+			t.Errorf("compaction reported an error: %v", ev.Err)
+		}
+	}
+	t.Logf("compactions: %d, first: %d -> %d tokens (llm=%v)",
+		len(events), events[0].BeforeToken, events[0].AfterToken, events[0].UsedLLM)
+
+	// The transcript was rewritten at least once. It must still be a valid
+	// payload, and the model must still be able to work from it.
+	assertNoOrphanToolResults(t, h.Agent.Context().Messages)
+
+	msgs, err := h.Agent.Prompt(ctx,
+		"Without reading any files again, what was the value of AlphaSecret that you found earlier?")
+	if err != nil {
+		t.Fatalf("turn 3: %v", err)
+	}
+	last := msgs[len(msgs)-1]
+	if last.StopReason == ai.StopError {
+		t.Fatalf("post-compaction turn failed: %s", last.ErrorMessage)
+	}
+	// 4711 came from a turn that compaction may well have summarized away. If
+	// the summary is doing its job, the answer survives.
+	answer := ""
+	for _, m := range msgs {
+		answer += m.Text()
+	}
+	if !strings.Contains(answer, "4711") {
+		t.Errorf("the value from before compaction did not survive; answer was:\n%s", answer)
+	}
+}
