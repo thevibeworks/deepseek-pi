@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/thevibeworks/deepseek-pi/agent"
 	"github.com/thevibeworks/deepseek-pi/ai"
@@ -31,6 +32,11 @@ type Options struct {
 	AppendSystemPrompt string
 	// Resume loads a prior transcript from this session file.
 	Resume string
+
+	// NoSubagents removes the task tool. Sub-agents are the right default for
+	// a coding agent, but an embedder driving deepseek-pi as a component may
+	// want a flat one-agent shape.
+	NoSubagents bool
 
 	// NoSkills disables skill discovery. Skills are cheap per turn once cached,
 	// but a large personal collection dominates the prompt, and someone who
@@ -74,6 +80,16 @@ type Harness struct {
 	// Skills and Instructions are exposed for status output.
 	Skills       []Skill
 	Instructions []InstructionFile
+
+	mu       sync.Mutex
+	children []ChildReport
+}
+
+// Children returns the sub-agents this session has run.
+func (h *Harness) Children() []ChildReport {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]ChildReport(nil), h.children...)
 }
 
 // New assembles a harness.
@@ -125,12 +141,14 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 		"DEEPSEEK_PI=1",
 	}
 
-	toolSet := []agent.Tool{
-		tools.Read(ws),
-		tools.Bash(ws, toolEnv),
-		tools.Edit(ws),
-		tools.Write(ws),
+	client := ai.NewClient(apiKey)
+	client.UserAgent = "deepseek-pi/" + Version
+
+	mode := opts.Mode
+	if mode == "" {
+		mode = ModeDefault
 	}
+	policy := NewPolicy(mode, opts.AllowTools)
 
 	instructions := DiscoverInstructions(cwd)
 	var skills []Skill
@@ -138,6 +156,23 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 		skills = DiscoverSkills(cwd)
 	}
 
+	toolSet := []agent.Tool{
+		tools.Read(ws),
+		tools.Bash(ws, toolEnv),
+		tools.Edit(ws),
+		tools.Write(ws),
+	}
+	var taskTool *taskEnv
+	if !opts.NoSubagents {
+		taskTool = &taskEnv{
+			cwd: cwd, newStream: client.StreamFunc, parentModel: model, parentPolicy: policy,
+			instructions: instructions, skills: skills, budget: DefaultBudget(),
+		}
+		toolSet = append(toolSet, newTaskTool(taskTool))
+	}
+
+	// Built from the FINAL tool set, task tool included, so its documentation
+	// reaches the model the same way every other tool's does.
 	systemPrompt := BuildSystemPrompt(PromptConfig{
 		Cwd:                 cwd,
 		Tools:               toolSet,
@@ -161,20 +196,11 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 		session = NewSession(sessionID, cwd, model.ID)
 	}
 
-	client := ai.NewClient(apiKey)
-	client.UserAgent = "deepseek-pi/" + Version
-
 	actx := &agent.Context{
 		SystemPrompt: systemPrompt,
 		Messages:     history,
 		Tools:        toolSet,
 	}
-
-	mode := opts.Mode
-	if mode == "" {
-		mode = ModeDefault
-	}
-	policy := NewPolicy(mode, opts.AllowTools)
 
 	// The compactor shares the parent system prompt so its summarization
 	// request lands on the same cached prefix instead of paying full input
@@ -207,6 +233,14 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 		Workspace: ws, Model: model, Policy: policy, Compactor: compactor,
 		Cache:  tracker,
 		Skills: skills, Instructions: instructions,
+	}
+
+	if taskTool != nil {
+		taskTool.onChild = func(r ChildReport) {
+			h.mu.Lock()
+			h.children = append(h.children, r)
+			h.mu.Unlock()
+		}
 	}
 
 	compactor.OnEvent = func(ev CompactionEvent) {

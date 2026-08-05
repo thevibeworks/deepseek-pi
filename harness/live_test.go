@@ -234,3 +234,64 @@ func TestLiveCacheTrackerSeesCompactionBreak(t *testing.T) {
 	}
 	t.Logf("cache report:\n%s", h.Cache.Report())
 }
+
+// TestLiveSubagentDelegation checks the whole sub-agent path against the real
+// model: the parent decides to delegate, children run in their own contexts,
+// and only their reports come back.
+func TestLiveSubagentDelegation(t *testing.T) {
+	dir := liveWorkspace(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+
+	h, err := New(ctx, Options{Cwd: dir, Mode: ModeYolo, NoSkills: true})
+	if err != nil {
+		t.Fatalf("harness: %v", err)
+	}
+	defer func() { _ = h.Close() }()
+
+	msgs, err := h.Agent.Prompt(ctx,
+		"Use two explorer sub-agents in a single batch, running concurrently: one to find "+
+			"the value of AlphaSecret, one to find the value of BetaSecret. Do not read the "+
+			"files yourself. Then report both numbers.")
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+
+	children := h.Children()
+	if len(children) < 2 {
+		t.Fatalf("expected at least 2 sub-agents, got %d", len(children))
+	}
+	for _, c := range children {
+		if c.Truncated != "" {
+			t.Errorf("%s sub-agent hit a budget: %s", c.Role, c.Truncated)
+		}
+		if c.Usage.Input == 0 {
+			t.Errorf("%s sub-agent recorded no usage", c.Role)
+		}
+	}
+
+	answer := ""
+	for _, m := range msgs {
+		answer += m.Text()
+	}
+	for _, want := range []string{"4711", "1337"} {
+		if !strings.Contains(answer, want) {
+			t.Errorf("the parent's answer is missing %s; delegation did not carry the result:\n%s",
+				want, answer)
+		}
+	}
+
+	// The point of delegating is that the children's tool output never reaches
+	// the parent. If file contents leaked, the tool costs more than inlining.
+	for _, m := range h.Agent.Context().Messages {
+		if m.Role == ai.RoleToolResult && m.ToolName == "read" {
+			t.Error("the parent ran a read itself; the test asked it to delegate")
+		}
+	}
+	t.Logf("children: %d, parent cost $%.4f", len(children), h.Session.Usage.Cost.Total)
+	for _, c := range children {
+		t.Logf("  %s: %d turns, %d in / %d out, $%.4f, %s",
+			c.Role, c.Turns, c.Usage.Input, c.Usage.Output, c.Usage.Cost.Total,
+			c.Duration.Round(time.Millisecond))
+	}
+}

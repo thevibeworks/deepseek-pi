@@ -33,7 +33,7 @@ Fixed. The loop started at index 1, skipping the first element, so it summed
 41113 in / 344 out - cache 30464 (74%) - $0.0017 - saved $0.0042
 ```
 
-Four tools: `read`, `bash`, `edit`, `write`. `bash` absorbs search and
+Five tools: `read`, `bash`, `edit`, `write`, `task`. `bash` absorbs search and
 navigation (`rg`, `fd`, `ls`, `sed`) rather than shipping a tool per verb —
 every schema lives in the cached prompt prefix, so a 4-schema tool set is
 materially cheaper per turn than a 40-schema one, and the model already knows
@@ -55,6 +55,32 @@ deepseek-pi -show-prompt         print the assembled system prompt
 Slash commands in an interactive session: `/mode`, `/model`, `/effort`,
 `/compact`, `/cache`, `/status`, `/prompt`, `/session`, `/thinking`, `/clear`,
 `/exit`.
+
+## Sub-agents
+
+`task(role, prompt)` delegates self-contained work to a sub-agent with its own
+context. The parent receives only the final report — never the child's tool
+output — which is the entire point: a broad search costs the parent one report
+instead of forty file reads.
+
+| role | can modify | model |
+|---|---|---|
+| `explorer` | no | flash |
+| `tester` | no | flash |
+| `reviewer` | no | **pro** — judgment is the one job where the cheap model is a false economy |
+| `implementer` | yes | flash |
+
+Sub-agents run **concurrently** when the model batches them, get their own
+transcript on disk, and are bounded by a budget (30 turns, 200k tokens, 5
+minutes). A child that hits one dies quietly and the parent still gets a
+partial report, clearly marked as partial — a truncated report that reads as
+complete is worse than none, because the parent acts on it.
+
+Two safety properties are structural rather than configured. Recursion is
+impossible because a child's tool set simply does not contain `task` — no depth
+counter to tune or get wrong. And a child is bounded by the **stricter** of its
+role and its parent, so an `implementer` under a `-plan` parent still cannot
+write; a mode another setting can escape is not a mode.
 
 ## Permissions
 
@@ -296,8 +322,8 @@ should stay that way.
 ## Status
 
 Early. The loop, tools, permissions, compaction, sessions, accounting and the
-eval harness and cache-break attribution work and are tested against the live
-API. Not yet built: sub-agents, branching sessions, a scheduler, and a
+eval harness, cache-break attribution and sub-agents work and are tested
+against the live API. Not yet built: branching sessions, a scheduler, and a
 full-screen TUI.
 
 ## License

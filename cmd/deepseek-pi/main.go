@@ -39,6 +39,7 @@ type flags struct {
 	yolo        bool
 	plan        bool
 	noSkills    bool
+	noSubagents bool
 	allow       listFlag
 	quiet       bool
 	thinking    bool
@@ -62,6 +63,7 @@ func parseFlags() *flags {
 	flag.BoolVar(&f.yolo, "yolo", false, "run every tool without asking (sandboxes and CI)")
 	flag.BoolVar(&f.plan, "plan", false, "read-only: investigate and propose, never modify")
 	flag.BoolVar(&f.noSkills, "no-skills", false, "skip skill discovery, for a minimal prompt prefix")
+	flag.BoolVar(&f.noSubagents, "no-subagents", false, "remove the task tool, for a flat one-agent shape")
 	flag.Var(&f.allow, "allow", "tool to pre-approve; repeatable or comma-separated (edit,write)")
 	flag.BoolVar(&f.quiet, "q", false, "print only the final answer")
 	flag.BoolVar(&f.thinking, "show-thinking", false, "stream reasoning as it arrives")
@@ -159,15 +161,16 @@ func run() error {
 	}
 
 	h, err := harness.New(ctx, harness.Options{
-		Cwd:        f.cwd,
-		Model:      normalizeModel(f.model),
-		Effort:     ai.Effort(f.effort),
-		MaxTokens:  f.maxTokens,
-		Resume:     resume,
-		NoSkills:   f.noSkills,
-		Mode:       mode,
-		AllowTools: f.allow,
-		Approve:    ask,
+		Cwd:         f.cwd,
+		Model:       normalizeModel(f.model),
+		Effort:      ai.Effort(f.effort),
+		MaxTokens:   f.maxTokens,
+		Resume:      resume,
+		NoSkills:    f.noSkills,
+		NoSubagents: f.noSubagents,
+		Mode:        mode,
+		AllowTools:  f.allow,
+		Approve:     ask,
 	})
 	if err != nil {
 		return err
@@ -466,6 +469,19 @@ func printStatus(h *harness.Harness, s style) {
 		s.bold, s.reset, u.Input, u.Output, u.CacheRead, u.CacheHitRate()*100)
 	fmt.Printf("%scost%s         $%.4f (cache saved $%.4f)\n",
 		s.bold, s.reset, u.Cost.Total, h.Model.CacheSavings(u))
+	if children := h.Children(); len(children) > 0 {
+		var childCost float64
+		var childTokens int
+		for _, c := range children {
+			childCost += c.Usage.Cost.Total
+			childTokens += c.Usage.Input + c.Usage.Output
+		}
+		// Sub-agent cost is reported separately because it does NOT appear in
+		// the session usage above: children have their own transcripts, and
+		// folding them in would make the parent's context look enormous.
+		fmt.Printf("%ssub-agents%s   %d run · %d tokens · $%.4f (separate transcripts)\n",
+			s.bold, s.reset, len(children), childTokens, childCost)
+	}
 	if n := len(h.Cache.Breaks); n > 0 {
 		fmt.Printf("%scache breaks%s %d, %d tokens re-billed (/cache for why)\n",
 			s.bold, s.reset, n, h.Cache.WastedTokens)
