@@ -47,6 +47,7 @@ type flags struct {
 	showPrompt  bool
 	listModels  bool
 	sessions    bool
+	prune       bool
 	version     bool
 }
 
@@ -71,6 +72,7 @@ func parseFlags() *flags {
 	flag.BoolVar(&f.showPrompt, "show-prompt", false, "print the assembled system prompt and exit")
 	flag.BoolVar(&f.listModels, "models", false, "list models with real limits and pricing")
 	flag.BoolVar(&f.sessions, "sessions", false, "list stored sessions for this workspace")
+	flag.BoolVar(&f.prune, "prune", false, "delete checkpoint data no session still refers to")
 	flag.BoolVar(&f.version, "version", false, "print the version and exit")
 
 	flag.Usage = usage
@@ -122,6 +124,8 @@ func run() error {
 		return printModels()
 	case f.sessions:
 		return printSessions(f.cwd)
+	case f.prune:
+		return pruneBlobs(f.cwd)
 	}
 
 	// SIGTERM ends the process. SIGINT is deliberately NOT handled here: it
@@ -339,7 +343,7 @@ func handleCommand(h *harness.Harness, r *renderer, line string, s style) (bool,
   /cache               why the prompt cache missed, and what it cost
   /compact             summarize earlier turns now, freeing context
   /turns               list the turns you can rewind or fork at
-  /rewind [N]          drop turn N and everything after (default: the last)
+  /rewind [N]          drop turn N onward and restore the files it changed
   /fork [N]            branch into a copy cut before turn N, original kept
   /status              session accounting and configuration
   /prompt              print the assembled system prompt
@@ -527,8 +531,12 @@ func printBranch(rep harness.BranchReport, s style) {
 	if rep.Forked {
 		verb = "forked"
 	}
-	fmt.Printf("%s %s — %d turn(s) kept, %d dropped\n",
-		verb, where, rep.Retained, len(rep.Discarded))
+	files := ""
+	if n := rep.Files.Reverted(); n > 0 {
+		files = fmt.Sprintf(", %d file(s) restored", n)
+	}
+	fmt.Printf("%s %s — %d turn(s) kept, %d dropped%s\n",
+		verb, where, rep.Retained, len(rep.Discarded), files)
 	if rep.Forked {
 		fmt.Printf("%snow writing %s; the branch you left is unchanged%s\n",
 			s.dim, rep.Session, s.reset)
@@ -537,25 +545,41 @@ func printBranch(rep harness.BranchReport, s style) {
 	printChanged(rep, s)
 }
 
-// printChanged names what the discarded turns did that dropping them will not
-// undo. Silence here would read as "nothing happened", which is the one wrong
+// printChanged reports the workspace side of a cut: what went back, and what
+// did not. Silence would read as "nothing happened", which is the one wrong
 // conclusion a user can draw.
 func printChanged(rep harness.BranchReport, s style) {
-	changed := rep.Changed()
-	if len(changed) == 0 {
-		return
-	}
-	fmt.Printf("%sthe conversation went back; the workspace did not:%s\n", s.yellow, s.reset)
-	for _, t := range changed {
-		for _, path := range t.Wrote {
-			fmt.Printf("  turn %d wrote %s\n", t.Number, path)
+	for _, c := range rep.Files.Changes {
+		switch c.Action {
+		case "reverted":
+			fmt.Printf("  %sreverted%s %s\n", s.green, s.reset, c.Path)
+		case "removed":
+			fmt.Printf("  %sremoved%s  %s\n", s.green, s.reset, c.Path)
 		}
+	}
+
+	// Everything below is what the cut could NOT undo. Shell commands are the
+	// permanent limit; a kept file is a specific refusal with a reason.
+	var stale []string
+	for _, t := range rep.Changed() {
 		for _, cmd := range t.Ran {
-			fmt.Printf("  turn %d ran  %s\n", t.Number, cmd)
+			stale = append(stale, fmt.Sprintf("turn %d ran %s", t.Number, cmd))
 		}
 		for _, role := range t.Delegated {
-			fmt.Printf("  turn %d delegated to a %s sub-agent\n", t.Number, role)
+			stale = append(stale, fmt.Sprintf("turn %d delegated to a %s sub-agent", t.Number, role))
 		}
+	}
+	kept := rep.Files.Kept()
+	if len(stale) == 0 && len(kept) == 0 {
+		return
+	}
+
+	fmt.Printf("%snot undone:%s\n", s.yellow, s.reset)
+	for _, k := range kept {
+		fmt.Printf("  kept %s — %s\n", k.Path, k.Why)
+	}
+	for _, line := range stale {
+		fmt.Printf("  %s\n", line)
 	}
 }
 
@@ -659,6 +683,29 @@ func printSessions(cwd string) error {
 			fmt.Printf("  forked from %s\n", s.Parent)
 		}
 	}
+	return nil
+}
+
+// pruneBlobs reclaims checkpoint storage. Snapshots are written on every file
+// change and nothing else removes them, so a long-lived workspace needs a way
+// to let go of the ones no session can still rewind to.
+func pruneBlobs(cwd string) error {
+	if cwd == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			return err
+		}
+	}
+	removed, freed, err := harness.PruneBlobs(cwd)
+	if err != nil {
+		return err
+	}
+	if removed == 0 {
+		fmt.Println("nothing to prune")
+		return nil
+	}
+	fmt.Printf("removed %d unreferenced blob(s), %s\n", removed, formatBytes(int(freed)))
 	return nil
 }
 

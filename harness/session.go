@@ -33,6 +33,9 @@ const (
 	// only the replayed view shrinks, so the transcript still shows the path
 	// that was abandoned.
 	EntryRewind EntryKind = "rewind"
+	// EntrySnapshot records one file's state around a tool call, so a later
+	// rewind can put the workspace back as well as the conversation.
+	EntrySnapshot EntryKind = "snapshot"
 )
 
 // Entry is one JSONL line.
@@ -60,6 +63,9 @@ type Entry struct {
 	// value — rewinding to an empty context — and omitempty drops it, which is
 	// harmless only because an absent field unmarshals back to the same zero.
 	Retained int `json:"retained,omitempty"`
+
+	// Snapshot carries a file capture.
+	Snapshot *FileSnapshot `json:"snapshot,omitempty"`
 }
 
 // SessionVersion is the on-disk format version.
@@ -238,6 +244,18 @@ func (s *Session) RecordRewind(retained int) error {
 	})
 }
 
+// RecordSnapshot appends a file capture.
+func (s *Session) RecordSnapshot(snap FileSnapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureFile(); err != nil {
+		return err
+	}
+	return s.writeEntry(Entry{
+		Kind: EntrySnapshot, Timestamp: time.Now().UnixMilli(), Snapshot: &snap,
+	})
+}
+
 // Fork writes msgs to a NEW session file that records where it branched from.
 //
 // The receiver is untouched, and the copy is a full copy rather than a pointer
@@ -299,6 +317,9 @@ type SessionInfo struct {
 	Preview  string
 	// Parent is the session this one was forked from, empty if it was not.
 	Parent string
+	// Snapshots are the file captures still live after replaying rewinds.
+	// Populated by LoadSession; listings do not need them and skip the work.
+	Snapshots []FileSnapshot
 }
 
 // ListSessions returns stored sessions for a workspace, newest first.
@@ -420,12 +441,26 @@ func LoadSession(path string) ([]ai.Message, SessionInfo, error) {
 			}
 		case EntryModelChange:
 			info.Model = e.Model
+		case EntrySnapshot:
+			if e.Snapshot != nil {
+				info.Snapshots = append(info.Snapshots, *e.Snapshot)
+			}
 		case EntryRewind:
 			// Guard against a file that claims to retain more than it holds,
 			// which a truncated write or a newer format version could produce.
 			if e.Retained < len(msgs) {
 				msgs = msgs[:e.Retained]
 			}
+			// Snapshots replay by the same rule as messages: a rewind consumed
+			// everything at or after the cut, so a resume must not offer to
+			// revert changes an earlier run already reverted.
+			kept := info.Snapshots[:0]
+			for _, s := range info.Snapshots {
+				if s.At < e.Retained {
+					kept = append(kept, s)
+				}
+			}
+			info.Snapshots = kept
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -436,14 +471,18 @@ func LoadSession(path string) ([]ai.Message, SessionInfo, error) {
 }
 
 // ResumeSession reopens an existing session file for appending.
-func ResumeSession(path string) (*Session, []ai.Message, error) {
+//
+// The info comes back too, because a resumed session needs more than its
+// messages: the file snapshots it replayed are what let a later rewind undo
+// work done in an earlier run.
+func ResumeSession(path string) (*Session, []ai.Message, SessionInfo, error) {
 	msgs, info, err := LoadSession(path)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, SessionInfo{}, err
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, SessionInfo{}, err
 	}
 	s := &Session{
 		id: info.ID, path: path, cwd: info.Cwd, model: info.Model,
@@ -453,7 +492,7 @@ func ResumeSession(path string) (*Session, []ai.Message, error) {
 	// Usage on resumed assistant messages is deliberately NOT re-accumulated:
 	// those tokens were billed in the earlier run, and counting them again
 	// would make a resumed session look like it cost double.
-	return s, msgs, nil
+	return s, msgs, info, nil
 }
 
 func firstLine(s string, max int) string {

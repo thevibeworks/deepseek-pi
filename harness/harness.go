@@ -72,6 +72,10 @@ type Harness struct {
 	// can report compactions and force one on demand.
 	Compactor *Compactor
 
+	// Checkpoints capture what the file tools change, so a rewind can put the
+	// workspace back and not merely report that it cannot.
+	Checkpoints *Checkpointer
+
 	// Cache explains prompt-cache misses. The prefix cache is what makes long
 	// sessions affordable, so its health should be observable rather than
 	// assumed.
@@ -199,13 +203,19 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 		Append:              opts.AppendSystemPrompt,
 	})
 
+	checkpoints := NewCheckpointer(ws, NewBlobStore(cwd))
+
 	var session *Session
 	var history []ai.Message
 	if opts.Resume != "" {
-		session, history, err = ResumeSession(opts.Resume)
+		var info SessionInfo
+		session, history, info, err = ResumeSession(opts.Resume)
 		if err != nil {
 			return nil, fmt.Errorf("resuming session: %w", err)
 		}
+		// Without this a resumed session can rewind its conversation but not
+		// the files, which is the difference between undo and a warning.
+		checkpoints.Restore(info.Snapshots)
 		// Usage on preserved assistant messages must not carry into the new
 		// run's accounting, or a resumed session reports tokens it did not
 		// spend and any budget check trips immediately.
@@ -229,6 +239,11 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 
 	tracker := NewCacheTracker(model)
 
+	// Declared before the hooks so they can reach the harness. Fork replaces the
+	// session, and a closure that captured the assembly-time pointer would go on
+	// writing to a file that has since been closed.
+	var h *Harness
+
 	cfg := agent.LoopConfig{
 		Model:         model.ID,
 		Effort:        opts.Effort,
@@ -239,17 +254,33 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 		// safe point: mid-turn the transcript holds an assistant message whose
 		// tool calls are still unanswered, and rewriting there orphans them.
 		PrepareNextTurn: compactor.PrepareNextTurn,
-		BeforeToolCall: func(c context.Context, call agent.ToolCall, _ *agent.Context) agent.BeforeToolResult {
-			return approve(c, policy, opts.Approve, call)
+		BeforeToolCall: func(c context.Context, call agent.ToolCall, actx *agent.Context) agent.BeforeToolResult {
+			decision := approve(c, policy, opts.Approve, call)
+			if !decision.Block {
+				// Capture only what is actually going to run. Snapshotting a
+				// refused call would store bytes nothing can ever restore.
+				checkpoints.Before(call, len(actx.Messages))
+			}
+			return decision
+		},
+		AfterToolCall: func(
+			_ context.Context, call agent.ToolCall, _ agent.ToolResult, failed bool, _ *agent.Context,
+		) *agent.AfterToolResult {
+			if snap := checkpoints.After(call, failed); snap != nil {
+				if err := h.session().RecordSnapshot(*snap); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: could not record a file snapshot: %v\n", err)
+				}
+			}
+			return nil // the result itself is left exactly as the tool produced it
 		},
 	}
 
 	a := agent.New(actx, cfg, tracker.Wrap(client.StreamFunc(ctx)))
 
-	h := &Harness{
+	h = &Harness{
 		Agent: a, Session: session, Client: client,
 		Workspace: ws, Model: model, Policy: policy, Compactor: compactor,
-		Cache:  tracker,
+		Cache: tracker, Checkpoints: checkpoints,
 		Skills: skills, Instructions: instructions,
 	}
 

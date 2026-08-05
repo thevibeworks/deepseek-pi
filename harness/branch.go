@@ -162,6 +162,9 @@ type BranchReport struct {
 	Session string
 	// Forked is set when a new session file was created.
 	Forked bool
+	// Files is what the workspace restore did. A cut that discarded no file
+	// changes leaves it empty.
+	Files Restored
 }
 
 // Changed lists the discarded turns that modified something on disk.
@@ -214,9 +217,10 @@ func branchReport(turns []Turn, turn, cut int) BranchReport {
 // is therefore safe to do repeatedly and survives a crash mid-rewind: either
 // the marker is on disk or it is not.
 //
-// What this cannot do is undo the turn's effects. Files written stay written,
-// commands run stay run. BranchReport.Changed names them so the caller can say
-// so plainly rather than letting the user assume otherwise.
+// Files the agent wrote are restored from the checkpoint store. Shell commands
+// are not and cannot be — a command may touch anything, and guessing would
+// produce a restore that is confidently wrong — so BranchReport still names
+// what it could not put back.
 func (h *Harness) Rewind(turn int) (BranchReport, error) {
 	actx := h.Agent.Context()
 	turns := Turns(actx.Messages)
@@ -239,6 +243,7 @@ func (h *Harness) Rewind(turn int) (BranchReport, error) {
 
 	rep := branchReport(turns, turn, cut)
 	rep.Session = h.Session.Path()
+	rep.Files = h.Checkpoints.RewindFiles(cut)
 	return rep, nil
 }
 
@@ -276,6 +281,10 @@ func (h *Harness) Fork(turn int) (BranchReport, error) {
 	rep := branchReport(turns, turn, cut)
 	rep.Forked = true
 	rep.Session = child.Path()
+	// Branching at a turn means wanting the state as of that turn, files
+	// included. Forking from the current end discards nothing and so restores
+	// nothing, which falls out of the cut point rather than needing a case.
+	rep.Files = h.Checkpoints.RewindFiles(cut)
 	return rep, nil
 }
 
@@ -296,6 +305,9 @@ func (h *Harness) Clear() (BranchReport, error) {
 	}
 	actx.Messages = nil
 	h.Compactor.SyncSummary(nil)
+	// Forget, not revert. Clearing is about the conversation; silently undoing
+	// a day of accepted edits because the context was dropped would be a shock.
+	h.Checkpoints.Forget(0)
 
 	rep := branchReport(turns, 1, 0)
 	rep.Session = h.Session.Path()

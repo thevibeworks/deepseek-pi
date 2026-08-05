@@ -408,3 +408,57 @@ func TestLiveBranchingKeepsTheSessionWorking(t *testing.T) {
 		h.Session.Usage.Cost.Total, h.Session.Usage.Input, h.Session.Usage.Output,
 		h.Session.Usage.CacheHitRate()*100)
 }
+
+// TestLiveCheckpointWiring exercises the path unit tests cannot reach: the
+// capture hooks live on the loop's tool-call seam, so only a real turn with a
+// real tool call proves they are connected. That seam has already produced one
+// bug — a closure holding the pre-fork session — and the failure mode is silent,
+// a rewind that reports nothing to restore because nothing was ever captured.
+func TestLiveCheckpointWiring(t *testing.T) {
+	dir := liveWorkspace(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	target := filepath.Join(dir, "alpha.go")
+	before, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := New(ctx, Options{Cwd: dir, Mode: ModeYolo, NoSkills: true})
+	if err != nil {
+		t.Fatalf("harness: %v", err)
+	}
+	defer func() { _ = h.Close() }()
+
+	if _, err := h.Agent.Prompt(ctx,
+		"Use the edit tool to change AlphaSecret from 4711 to 9999 in alpha.go. Then stop."); err != nil {
+		t.Fatalf("turn 1: %v", err)
+	}
+
+	after, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) == string(before) {
+		t.Skip("the model did not edit the file; nothing to checkpoint")
+	}
+	if len(h.Checkpoints.Snapshots()) == 0 {
+		t.Fatal("a real edit produced no snapshot; the capture hooks are not wired in")
+	}
+
+	rep, err := h.Rewind(1)
+	if err != nil {
+		t.Fatalf("Rewind: %v", err)
+	}
+	if rep.Files.Reverted() != 1 {
+		t.Errorf("restored %d files, want 1: %+v", rep.Files.Reverted(), rep.Files.Changes)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(before) {
+		t.Errorf("the file did not go back:\n got: %s\nwant: %s", got, before)
+	}
+}

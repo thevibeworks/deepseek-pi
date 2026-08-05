@@ -100,6 +100,18 @@ Branching does not break the prefix cache and must not start to: the retained
 prefix is byte-identical, and the live test asserts no cache break is recorded
 across a rewind or a fork.
 
+`harness/checkpoint.go` is what lets a rewind restore files. Two rules there.
+Restore the EARLIEST snapshot at or after the cut — that is the state before
+the discarded work started — but decide whether restoring is *safe* from the
+LATEST one, by requiring that what is on disk is byte-for-byte what the agent
+last wrote. A rewind that silently overwrites a hand edit is a worse tool than
+one that cannot rewind at all. And never add `bash` to `checkpointedTools`: a
+command may touch anything, so the honest move is to report the limit.
+
+The capture hooks sit on the loop's tool-call seam, which unit tests cannot
+reach. `TestLiveCheckpointWiring` is what proves they are connected; without it
+a disconnected hook fails silently, as a rewind that finds nothing to restore.
+
 ## The prompt cache
 
 `/cache` reports why the prefix cache missed and what it cost. It should say

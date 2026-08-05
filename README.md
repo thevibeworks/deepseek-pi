@@ -49,6 +49,7 @@ deepseek-pi -c                   continue the most recent session here
 deepseek-pi -m pro -e high ...   pro model, high reasoning effort
 deepseek-pi -plan                read-only: investigate and propose
 deepseek-pi -sessions            list stored sessions
+deepseek-pi -prune               drop checkpoint data no session refers to
 deepseek-pi -show-prompt         print the assembled system prompt
 ```
 
@@ -89,15 +90,36 @@ replays it, so the transcript still records the path you abandoned while the
 context the model sees goes back. Storage and view are separate, exactly as
 they already are for compaction.
 
-**It does not undo anything outside the conversation.** Files written stay
-written. The report names them rather than letting you assume otherwise —
-that's the `*` in `/turns` and the warning above. Read-only commands are
-excluded via the same classifier the permission gate uses, so `rg` is not
-reported as a change, and a turn that delegated its writing to a sub-agent is
-reported even though the child's tool calls never appear in this transcript.
+**The workspace goes back too — for the files the agent wrote.** Every `write`
+and `edit` is checkpointed at the tool-call seam, so a rewind restores the
+files that turn changed and deletes the ones it created. Shell commands are
+not checkpointed and cannot be: a command may touch anything, and guessing
+would produce a restore that is confidently wrong. What could not be undone is
+listed rather than omitted:
 
-`/clear` is a rewind to nothing and goes through the same path, so a cleared
-conversation stays cleared across `-c`.
+```
+$ /rewind 2
+rewound to before turn 2 — 1 turn(s) kept, 2 dropped, 1 file(s) restored
+  removed  extra.go
+not undone:
+  kept demo.go — it changed outside this conversation since the agent wrote it
+  turn 3 ran go generate ./...
+```
+
+That `kept` line is the safety property. A restore only proceeds when what is
+on disk is byte-for-byte what the agent last wrote there; anything you edited
+by hand in the meantime is left alone, because destroying work the
+conversation never knew about is worse than not restoring at all. Snapshots
+persist in the session file, so `-c` can rewind work from an earlier run.
+
+`/clear` is a rewind to nothing, so a cleared conversation stays cleared across
+`-c` — but it deliberately does *not* revert files. Clearing is about the
+context; silently undoing a day of accepted edits because you dropped the
+conversation would be a shock.
+
+Content is stored content-addressed under the workspace's session directory,
+so a repeated edit and a fork cost nothing extra. Nothing collects it
+automatically — `deepseek-pi -prune` drops what no session can still rewind to.
 
 Branching is nearly free, because a truncated prefix is still a cached prefix.
 Measured against the live API, the turn after a cut read 17792 of 17809 input
@@ -383,9 +405,10 @@ should stay that way.
 ## Status
 
 Early. The loop, tools, permissions, compaction, sessions, accounting and the
-eval harness, cache-break attribution, sub-agents and session branching work
-and are tested against the live API. Not yet built: a scheduler and a
-full-screen TUI.
+eval harness, cache-break attribution, sub-agents, session branching and
+workspace checkpointing work and are tested against the live API. Not yet
+built: a session-level cost budget, readline-style input (a pasted block is
+still one turn per line), a scheduler and a full-screen TUI.
 
 ## License
 
