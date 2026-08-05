@@ -204,3 +204,27 @@ func TestBundledBaselineIsLoadable(t *testing.T) {
 		t.Errorf("baseline has %d repeat(s); a single sample is too noisy to gate against", run.Repeat)
 	}
 }
+
+func TestEffectiveToleranceUsesTheNoisierRun(t *testing.T) {
+	// The failure this prevents: calibrating only from the baseline makes the
+	// gate most confident exactly when it should not be — when the CURRENT run
+	// is the one that wandered. Observed for real: a quiet baseline (26%
+	// spread) against a run whose spread was 133%.
+	quiet := Run{Repeat: 3, Results: []Result{
+		result("a", true, 100, 10, 0.01),
+		result("a", true, 100, 10, 0.01),
+		result("a", true, 100, 10, 0.01),
+	}}
+	noisy := Run{Repeat: 3, Results: []Result{
+		result("a", true, 100, 10, 0.01),
+		result("a", true, 300, 10, 0.01),
+		result("a", true, 200, 10, 0.01),
+	}}
+
+	if got := EffectiveTolerance(quiet, noisy); got < 0.9 {
+		t.Errorf("EffectiveTolerance = %v; it must reflect the noisier run (spread 1.0)", got)
+	}
+	if EffectiveTolerance(quiet, noisy) != EffectiveTolerance(noisy, quiet) {
+		t.Error("tolerance depends on argument order; it should be a property of the pair")
+	}
+}

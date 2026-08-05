@@ -52,7 +52,7 @@ func run() error {
 			return fmt.Errorf("loading run: %w", err)
 		}
 		comparisons, ok := eval.Compare(base, cur)
-		fmt.Print(eval.FormatComparisonWithTolerance(comparisons, ok, eval.EffectiveTolerance(base)))
+		fmt.Print(eval.FormatComparisonWithTolerance(comparisons, ok, eval.EffectiveTolerance(base, cur)))
 		if !ok {
 			os.Exit(1)
 		}
@@ -114,7 +114,7 @@ func run() error {
 		}
 		comparisons, ok := eval.Compare(base, run)
 		fmt.Println()
-		fmt.Print(eval.FormatComparisonWithTolerance(comparisons, ok, eval.EffectiveTolerance(base)))
+		fmt.Print(eval.FormatComparisonWithTolerance(comparisons, ok, eval.EffectiveTolerance(base, run)))
 		if !ok {
 			os.Exit(1)
 		}

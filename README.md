@@ -233,20 +233,31 @@ cannot gate anything. Verifiers restore their own canonical test files from
 `$EVAL_TASK_DIR` before checking, so a task cannot be passed by deleting the
 test.
 
-The gate calibrates itself to noise, because that noise is larger than you
-would guess. Two consecutive runs of an *unchanged* agent over the same three
-tasks differed by 24% on input tokens and 42% on output tokens — the model
-simply words things differently and takes a different number of turns. So a
-single sample per task cannot gate efficiency at all: `-repeat 3` compares
-medians, a task counts as passed only if every repeat passed, and the tolerance
-is the larger of a 25% floor and the spread measured inside the baseline's own
-repeats. Correctness has no tolerance.
+The gate calibrates itself to noise, and the noise is much larger than it
+looks. Two consecutive runs of an *unchanged* agent differed by 24% on input
+tokens. Calibrating a tolerance from that measurement then failed on the next
+run, which showed a **101-133% within-task spread** — the same task finishing in
+5 turns or in 15, depending on nothing.
 
-Current baseline (flash, 3 repeats, medians):
+That is turn-count variance, and it is heavy-tailed, so:
+
+- A single sample per task cannot gate efficiency. `-repeat 5` compares medians.
+- A task counts as passed only if **every** repeat passed. Flaky is not passing.
+- The tolerance is the largest spread either run revealed, floored at 25% —
+  calibrating from the baseline alone leaves the gate most confident exactly
+  when it should not be, which is when the *current* run is the one that
+  wandered.
+- Correctness has no tolerance at all.
+
+The practical consequence: this suite can catch a correctness regression or a
+gross efficiency regression, and it cannot resolve a 20% token improvement. If
+you want that resolution, raise `-repeat` — more samples, not a tighter number.
+
+Current baseline (flash, 5 repeats, medians):
 
 ```
-3/3 passed · 34972 in / 2736 out · cache 85% · $0.0017 · 27s
-widest input-token spread within a task: 26%
+3/3 passed · 36468 in / 2971 out · cache 82% · $0.0017 · 30s
+widest input-token spread within a task: 101%
 ```
 
 ## Development

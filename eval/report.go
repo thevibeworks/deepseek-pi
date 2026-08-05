@@ -29,11 +29,16 @@ func FormatRun(run Run) string {
 	s := run.Summarize()
 	fmt.Fprintf(&b, "\n%d/%d passed · %d in / %d out · cache %.0f%% · $%.4f · %.0fs\n",
 		s.Passed, s.Tasks, s.Input, s.Output, s.CacheHitRate()*100, s.CostUSD, s.DurationS)
-	if run.Repeat > 1 {
+	switch {
+	case run.Repeat > 1 && s.MaxSpread > 0.5:
+		fmt.Fprintf(&b, "medians over %d repeats; widest input-token spread within a task: %.0f%% "+
+			"— that is turn-count variance, so treat any efficiency delta below it as noise\n",
+			run.Repeat, s.MaxSpread*100)
+	case run.Repeat > 1:
 		fmt.Fprintf(&b, "medians over %d repeats; widest input-token spread within a task: %.0f%%\n",
 			run.Repeat, s.MaxSpread*100)
-	} else {
-		fmt.Fprintf(&b, "single sample per task — too noisy to gate efficiency; use -repeat 3\n")
+	default:
+		fmt.Fprintf(&b, "single sample per task — far too noisy to gate efficiency; use -repeat 5\n")
 	}
 	return b.String()
 }
@@ -63,28 +68,42 @@ func (c Comparison) PercentChange() float64 {
 // MinTolerance is the floor on how much a token or cost metric may move before
 // it counts as a regression.
 //
-// This number was measured, not chosen. Two consecutive runs of an unchanged
-// agent over the same three tasks differed by 24% on input tokens and 42% on
-// output tokens, purely because the model worded things differently and took a
-// different number of turns. A 10% gate — the obvious first guess, and the one
-// this file originally shipped — fails on pure noise, and a gate that cries
-// wolf is worse than no gate because people learn to ignore it.
+// Both this number and the machinery around it come from being wrong twice.
 //
-// The effective tolerance is the LARGER of this floor and the spread actually
-// observed within the baseline's own repeats, so the gate calibrates itself to
-// the noise of the suite it is gating rather than to an assumption about it.
+// First guess: 10%, chosen because it sounded reasonable. Running the suite
+// twice against an UNCHANGED agent produced +24% input and +42% output tokens.
+// Pure model variance.
+//
+// Second guess: 25%, calibrated from the spread measured inside one baseline
+// run. The next run showed a 133% within-task spread — the same task finishing
+// in 5 turns or in 15, depending on nothing. A single run's spread is itself
+// one sample of the noise, so calibrating from it understates the noise about
+// half the time.
+//
+// What actually follows from that: this suite's variance is dominated by
+// TURN-COUNT variance, which is heavy-tailed, so a small number of repeats
+// gives an unstable median. The honest response is more samples, not a looser
+// number, and EffectiveTolerance now considers the spread seen in BOTH runs
+// because the noise floor is a property of the suite that either run can
+// reveal.
 //
 // Correctness has no tolerance. A task that passed and now fails is always a
 // regression, however the tokens moved.
 const MinTolerance = 0.25
 
 // EffectiveTolerance is the noise floor a change must clear to count.
-func EffectiveTolerance(baseline Run) float64 {
-	measured := baseline.Summarize().MaxSpread
-	if measured > MinTolerance {
-		return measured
+//
+// It takes the widest spread either run revealed. Using only the baseline's
+// spread makes the gate confident in exactly the case where it should not be:
+// when the current run is the one that wandered.
+func EffectiveTolerance(runs ...Run) float64 {
+	tol := MinTolerance
+	for _, r := range runs {
+		if s := r.Summarize().MaxSpread; s > tol {
+			tol = s
+		}
 	}
-	return MinTolerance
+	return tol
 }
 
 // Compare measures a run against a baseline.
@@ -94,7 +113,7 @@ func EffectiveTolerance(baseline Run) float64 {
 // soften either.
 func Compare(baseline, current Run) ([]Comparison, bool) {
 	b, c := baseline.Summarize(), current.Summarize()
-	tol := EffectiveTolerance(baseline)
+	tol := EffectiveTolerance(baseline, current)
 
 	comparisons := []Comparison{
 		{

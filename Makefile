@@ -29,15 +29,15 @@ test-live: ## Tests that hit the real API; needs DEEPSEEK_API_KEY. Costs a few c
 
 .PHONY: eval
 eval: ## Run the benchmark suite (costs a few cents)
-	go run ./cmd/dspi-eval -repeat 3
+	go run ./cmd/dspi-eval -repeat 5
 
 .PHONY: eval-gate
 eval-gate: ## Run the suite and gate it against the committed baseline
-	go run ./cmd/dspi-eval -repeat 3 -baseline eval/baseline-flash.json
+	go run ./cmd/dspi-eval -repeat 5 -baseline eval/baseline-flash.json
 
 .PHONY: eval-baseline
 eval-baseline: ## Record a new baseline. Only from a known-good tree.
-	go run ./cmd/dspi-eval -repeat 3 -out eval/baseline-flash.json
+	go run ./cmd/dspi-eval -repeat 5 -out eval/baseline-flash.json
 
 .PHONY: cover
 cover: ## Coverage report
