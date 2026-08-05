@@ -112,6 +112,7 @@ In an interactive session, /help lists the slash commands.
 
 func run() error {
 	f := parseFlags()
+	s := newStyle(colorEnabled(os.Stdout))
 
 	switch {
 	case f.version:
@@ -123,10 +124,14 @@ func run() error {
 		return printSessions(f.cwd)
 	}
 
-	// Ctrl-C cancels the in-flight run rather than killing the process, so a
-	// long tool call can be interrupted without losing the session.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// SIGTERM ends the process. SIGINT is deliberately NOT handled here: it
+	// belongs to whatever is currently running, and a context cancelled at the
+	// top would take the session down with it. See interrupter.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
+
+	interrupts := newInterrupter(os.Stderr, s)
+	defer interrupts.stop()
 
 	resume := f.resume
 	if f.continueRun && resume == "" {
@@ -144,8 +149,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-
-	s := newStyle(colorEnabled(os.Stdout))
 
 	// One scanner for the whole process: the REPL and the approval prompt read
 	// the same stdin, and two scanners would each buffer ahead and swallow the
@@ -202,9 +205,9 @@ func run() error {
 	}
 
 	if f.prompt != "" {
-		return runOnce(ctx, h, r, f.prompt, s)
+		return runOnce(ctx, h, r, f.prompt, s, interrupts)
 	}
-	return runInteractive(ctx, h, r, s, stdin)
+	return runInteractive(ctx, h, r, s, stdin, interrupts)
 }
 
 // resolveMode turns the mode flags into one posture, rejecting combinations
@@ -249,8 +252,11 @@ func normalizeModel(m string) string {
 	}
 }
 
-func runOnce(ctx context.Context, h *harness.Harness, r *renderer, prompt string, s style) error {
-	_, err := h.Agent.Prompt(ctx, prompt)
+func runOnce(ctx context.Context, h *harness.Harness, r *renderer, prompt string, s style, in *interrupter) error {
+	// A headless run has one thing in flight, so Ctrl-C means cancel it.
+	runCtx, done := in.arm(ctx)
+	_, err := h.Agent.Prompt(runCtx, prompt)
+	done()
 	r.Finish()
 	if err != nil {
 		return err
@@ -263,7 +269,10 @@ func runOnce(ctx context.Context, h *harness.Harness, r *renderer, prompt string
 	return ctx.Err()
 }
 
-func runInteractive(ctx context.Context, h *harness.Harness, r *renderer, s style, in *bufio.Scanner) error {
+func runInteractive(
+	ctx context.Context, h *harness.Harness, r *renderer, s style,
+	in *bufio.Scanner, sig *interrupter,
+) error {
 	fmt.Printf("%s%s %s%s — %s, %s mode, workspace %s\n",
 		s.bold, harness.Name, harness.Version, s.reset, h.Model.Name,
 		h.Policy.Mode, h.Workspace.Root)
@@ -293,12 +302,12 @@ func runInteractive(ctx context.Context, h *harness.Harness, r *renderer, s styl
 			continue
 		}
 
-		// A fresh cancel scope per turn: Ctrl-C should end the current run and
-		// return to the prompt, not tear down the session.
-		turnCtx, cancel := signal.NotifyContext(ctx, os.Interrupt)
+		// Ctrl-C is armed only while a turn is in flight, so it ends the run and
+		// returns to the prompt instead of tearing down the session.
+		turnCtx, done := sig.arm(ctx)
 		_, err := h.Agent.Prompt(turnCtx, line)
 		r.Finish()
-		cancel()
+		done()
 
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%serror:%s %v\n", s.red, s.reset, err)
