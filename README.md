@@ -91,9 +91,13 @@ they already are for compaction.
 
 **It does not undo anything outside the conversation.** Files written stay
 written. The report names them rather than letting you assume otherwise —
-that's the `*` in `/turns` and the warning above, and read-only commands are
+that's the `*` in `/turns` and the warning above. Read-only commands are
 excluded via the same classifier the permission gate uses, so `rg` is not
-reported as a change.
+reported as a change, and a turn that delegated its writing to a sub-agent is
+reported even though the child's tool calls never appear in this transcript.
+
+`/clear` is a rewind to nothing and goes through the same path, so a cleared
+conversation stays cleared across `-c`.
 
 Branching is nearly free, because a truncated prefix is still a cached prefix.
 Measured against the live API, the turn after a cut read 17792 of 17809 input

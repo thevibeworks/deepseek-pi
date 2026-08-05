@@ -32,6 +32,11 @@ type Turn struct {
 	Wrote []string
 	// Ran lists the turn's shell commands that were not read-only.
 	Ran []string
+	// Delegated lists sub-agent roles the turn spawned that could change
+	// things. A child's tool calls never appear in this transcript — the parent
+	// sees one task call and a report — so without this a turn that delegated
+	// all its writing would read as having changed nothing.
+	Delegated []string
 }
 
 // Changed reports whether the turn touched anything outside the transcript.
@@ -39,7 +44,9 @@ type Turn struct {
 // This is the number that matters when rewinding: the conversation goes back
 // and the filesystem does not, so a turn that wrote a file leaves that file
 // behind after it is dropped from the context.
-func (t Turn) Changed() bool { return len(t.Wrote) > 0 || len(t.Ran) > 0 }
+func (t Turn) Changed() bool {
+	return len(t.Wrote) > 0 || len(t.Ran) > 0 || len(t.Delegated) > 0
+}
 
 // Turns segments a transcript into addressable branch points.
 func Turns(msgs []ai.Message) []Turn {
@@ -62,10 +69,19 @@ func Turns(msgs []ai.Message) []Turn {
 		})
 	}
 	for i := range turns {
-		turns[i].Wrote, turns[i].Ran = changes(msgs[turns[i].Start:turns[i].End])
+		changes(&turns[i], msgs[turns[i].Start:turns[i].End])
 	}
 	return turns
 }
+
+// pathKeys are the argument names a file tool may have been called with.
+//
+// The transcript stores the model's RAW arguments: the loop heals aliases into
+// a local copy before executing, so what lands on disk is whatever the model
+// actually emitted. Reading only "path" therefore misses every call that said
+// file_path, which is common enough that tools.Write and tools.Edit carry a
+// heal map for it. Keep this in step with those maps.
+var pathKeys = []string{"path", "file_path", "filepath", "filename", "file"}
 
 // changes reports what a stretch of transcript did to the machine.
 //
@@ -74,8 +90,16 @@ func Turns(msgs []ai.Message) []Turn {
 // point here is to warn about anything that may have landed. Shell commands go
 // through the same classifier the permission gate uses, so a turn that only ran
 // `rg` is not reported as having changed anything.
-func changes(msgs []ai.Message) (wrote, ran []string) {
+func changes(t *Turn, msgs []ai.Message) {
 	seen := map[string]bool{}
+	add := func(list *[]string, kind, value string) {
+		if value == "" || seen[kind+value] {
+			return
+		}
+		seen[kind+value] = true
+		*list = append(*list, value)
+	}
+
 	for _, m := range msgs {
 		if m.Role != ai.RoleAssistant {
 			continue
@@ -86,35 +110,44 @@ func changes(msgs []ai.Message) (wrote, ran []string) {
 			}
 			switch c.Name {
 			case "write", "edit":
-				path := argString(c.Arguments, "path")
-				if path == "" || seen["p:"+path] {
-					continue
-				}
-				seen["p:"+path] = true
-				wrote = append(wrote, path)
+				add(&t.Wrote, "p:", argString(c.Arguments, pathKeys...))
 			case "bash":
 				if safe, _ := classifyBash(c.Arguments); safe {
 					continue
 				}
-				cmd := firstLine(extractCommand(c.Arguments), 60)
-				if cmd == "" || seen["c:"+cmd] {
-					continue
+				add(&t.Ran, "c:", firstLine(extractCommand(c.Arguments), 60))
+			case "task":
+				if role := argString(c.Arguments, "role", "type"); mayMutate(Role(role)) {
+					add(&t.Delegated, "d:", role)
 				}
-				seen["c:"+cmd] = true
-				ran = append(ran, cmd)
 			}
 		}
 	}
-	return wrote, ran
 }
 
-func argString(raw json.RawMessage, key string) string {
+// mayMutate reports whether a sub-agent role can change the workspace.
+//
+// An unrecognized role counts as mutating, on the same principle as the shell
+// classifier: unknown means unsafe. A role added later that writes must not go
+// unreported because this function predates it, and the cost of being wrong is
+// one extra line of warning against a silently missed change.
+func mayMutate(role Role) bool {
+	preset, known := rolePresets[role]
+	return !known || preset.mode != ModePlan
+}
+
+// argString returns the first key present in raw arguments.
+func argString(raw json.RawMessage, keys ...string) string {
 	var m map[string]any
 	if json.Unmarshal(raw, &m) != nil {
 		return ""
 	}
-	s, _ := m[key].(string)
-	return s
+	for _, k := range keys {
+		if s, ok := m[k].(string); ok && s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // BranchReport describes what a rewind or fork did.
@@ -202,6 +235,7 @@ func (h *Harness) Rewind(turn int) (BranchReport, error) {
 		return BranchReport{}, err
 	}
 	actx.Messages = actx.Messages[:cut]
+	h.Compactor.SyncSummary(actx.Messages)
 
 	rep := branchReport(turns, turn, cut)
 	rep.Session = h.Session.Path()
@@ -237,9 +271,33 @@ func (h *Harness) Fork(turn int) (BranchReport, error) {
 	}
 	h.setSession(child)
 	actx.Messages = retained
+	h.Compactor.SyncSummary(retained)
 
 	rep := branchReport(turns, turn, cut)
 	rep.Forked = true
 	rep.Session = child.Path()
+	return rep, nil
+}
+
+// Clear drops the whole conversation.
+//
+// It is a rewind to nothing, and it goes through the same recording path for
+// the same reason: /clear used to change only the in-memory context, so
+// `deepseek-pi -c` replayed the file and handed back every message the user had
+// just been told was gone. Announcing a cleared conversation and then restoring
+// it is worse than not offering the command.
+func (h *Harness) Clear() (BranchReport, error) {
+	actx := h.Agent.Context()
+	turns := Turns(actx.Messages)
+	if len(actx.Messages) > 0 {
+		if err := h.Session.RecordRewind(0); err != nil {
+			return BranchReport{}, err
+		}
+	}
+	actx.Messages = nil
+	h.Compactor.SyncSummary(nil)
+
+	rep := branchReport(turns, 1, 0)
+	rep.Session = h.Session.Path()
 	return rep, nil
 }

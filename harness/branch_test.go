@@ -428,3 +428,123 @@ func TestListingHonorsRewind(t *testing.T) {
 		t.Errorf("listing still shows a discarded prompt: %q", list[0].Preview)
 	}
 }
+
+func TestAliasedPathArgumentsAreDetected(t *testing.T) {
+	// The transcript stores the model's raw arguments; the loop heals aliases
+	// into a copy it never writes back. Reading only "path" therefore misses a
+	// real write, and a missed write is exactly the warning that matters.
+	for _, key := range []string{"path", "file_path", "filepath", "filename", "file"} {
+		msgs := []ai.Message{
+			ai.UserMessage("fix it"),
+			toolCall("w1", "write", `{"`+key+`":"parser.go","content":"x"}`),
+			toolResult("w1", "write", "wrote parser.go"),
+		}
+		turn := Turns(msgs)[0]
+		if !turn.Changed() {
+			t.Errorf("a write using %q went unreported", key)
+			continue
+		}
+		if turn.Wrote[0] != "parser.go" {
+			t.Errorf("%q gave path %q, want parser.go", key, turn.Wrote[0])
+		}
+	}
+}
+
+func TestDelegatedChangesAreReported(t *testing.T) {
+	// A child's tool calls never reach this transcript: the parent sees one
+	// task call and a text report. Without this, a turn that delegated all its
+	// writing reads as having changed nothing.
+	cases := []struct {
+		role string
+		want bool
+	}{
+		{"implementer", true},
+		{"explorer", false},
+		{"reviewer", false},
+		{"tester", false},
+		// Unknown means unsafe, as with the shell classifier: a role added later
+		// must not go unreported because this predates it.
+		{"demolisher", true},
+	}
+	for _, c := range cases {
+		msgs := []ai.Message{
+			ai.UserMessage("fix it"),
+			toolCall("t1", "task", `{"role":"`+c.role+`","prompt":"go"}`),
+			toolResult("t1", "task", "done"),
+		}
+		turn := Turns(msgs)[0]
+		if got := turn.Changed(); got != c.want {
+			t.Errorf("role %q reported changed=%v, want %v", c.role, got, c.want)
+		}
+	}
+}
+
+func TestClearIsPersisted(t *testing.T) {
+	// /clear used to change only the in-memory context, so `-c` replayed the
+	// file and handed back every message the user had just been told was gone.
+	h := testHarness(t)
+	path := h.Session.Path()
+
+	rep, err := h.Clear()
+	if err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if len(h.Agent.Context().Messages) != 0 {
+		t.Error("clear left messages in the context")
+	}
+	// It still owes the user the truth about what it did not undo.
+	if len(rep.Changed()) != 1 {
+		t.Errorf("clear reported %d changed turns, want 1", len(rep.Changed()))
+	}
+	if err := h.Session.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	loaded, _, err := LoadSession(path)
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	if len(loaded) != 0 {
+		t.Errorf("resuming a cleared session restored %d messages", len(loaded))
+	}
+}
+
+func TestCutForgetsASummaryItDiscarded(t *testing.T) {
+	// The running summary is carried forward so a later compaction can update
+	// it. Rewind past it and that text describes turns the user deliberately
+	// threw away — folding them back in is the opposite of what they asked for.
+	h := testHarness(t)
+	h.Agent.Context().Messages = []ai.Message{
+		ai.UserMessage("first"),
+		assistant("ok"),
+		ai.UserMessage(summaryPreamble + "we already fixed the parser"),
+		assistant("understood"),
+	}
+	h.Compactor.SyncSummary(h.Agent.Context().Messages)
+	if h.Compactor.lastSummary == "" {
+		t.Fatal("the summary in the transcript was not picked up")
+	}
+
+	if _, err := h.Rewind(2); err != nil {
+		t.Fatalf("Rewind: %v", err)
+	}
+	if h.Compactor.lastSummary != "" {
+		t.Errorf("a discarded summary is still being carried forward: %q", h.Compactor.lastSummary)
+	}
+}
+
+func TestCutKeepsASummaryItRetained(t *testing.T) {
+	h := testHarness(t)
+	h.Agent.Context().Messages = []ai.Message{
+		ai.UserMessage(summaryPreamble + "we already fixed the parser"),
+		assistant("understood"),
+		ai.UserMessage("now benchmark it"),
+		assistant("done"),
+	}
+	if _, err := h.Rewind(2); err != nil {
+		t.Fatalf("Rewind: %v", err)
+	}
+	if h.Compactor.lastSummary != "we already fixed the parser" {
+		t.Errorf("a retained summary was dropped: %q", h.Compactor.lastSummary)
+	}
+}

@@ -336,7 +336,7 @@ func handleCommand(h *harness.Harness, r *renderer, line string, s style) (bool,
   /prompt              print the assembled system prompt
   /session             path to this session's transcript
   /thinking            toggle streaming of reasoning
-  /clear               forget the conversation, keep the session file
+  /clear               forget the conversation, keep the transcript on disk
   /exit                leave
 `)
 	case "exit", "quit", "q":
@@ -454,8 +454,12 @@ func handleCommand(h *harness.Harness, r *renderer, line string, s style) (bool,
 		fmt.Printf("thinking display: %s\n", state)
 
 	case "clear":
-		h.Agent.Context().Messages = nil
+		rep, err := h.Clear()
+		if err != nil {
+			return false, err
+		}
 		fmt.Println("conversation cleared")
+		printChanged(rep, s)
 
 	default:
 		return false, fmt.Errorf("unknown command /%s (try /help)", cmd)
@@ -521,6 +525,13 @@ func printBranch(rep harness.BranchReport, s style) {
 			s.dim, rep.Session, s.reset)
 	}
 
+	printChanged(rep, s)
+}
+
+// printChanged names what the discarded turns did that dropping them will not
+// undo. Silence here would read as "nothing happened", which is the one wrong
+// conclusion a user can draw.
+func printChanged(rep harness.BranchReport, s style) {
 	changed := rep.Changed()
 	if len(changed) == 0 {
 		return
@@ -532,6 +543,9 @@ func printBranch(rep harness.BranchReport, s style) {
 		}
 		for _, cmd := range t.Ran {
 			fmt.Printf("  turn %d ran  %s\n", t.Number, cmd)
+		}
+		for _, role := range t.Delegated {
+			fmt.Printf("  turn %d delegated to a %s sub-agent\n", t.Number, role)
 		}
 	}
 }

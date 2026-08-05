@@ -119,6 +119,31 @@ func (c *Compactor) Threshold() int {
 	return int(float64(c.Model.ContextWindow) * trigger)
 }
 
+// SyncSummary re-points the running summary at whatever the transcript now
+// holds. Anything that cuts history has to call it.
+//
+// The summary is carried forward so a later compaction can UPDATE it instead of
+// re-summarizing a transcript that already begins with one. That is only valid
+// while the summary is still in the transcript. Rewind past it and the carried
+// text describes turns the user deliberately discarded — the next compaction
+// would fold them straight back in, which is the opposite of what they asked
+// for. Compaction itself does not need this: it only ever appends a summary it
+// just produced.
+func (c *Compactor) SyncSummary(msgs []ai.Message) {
+	found := ""
+	for _, m := range msgs {
+		if m.Role != ai.RoleUser {
+			continue
+		}
+		if text := m.Text(); strings.HasPrefix(text, summaryPreamble) {
+			found = strings.TrimPrefix(text, summaryPreamble)
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastSummary = found
+}
+
 // PrepareNextTurn is the agent.LoopConfig hook.
 //
 // It returns a replacement context when the transcript was rewritten, and nil
