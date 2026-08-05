@@ -73,6 +73,20 @@ same commit. Nothing else classifies them.
 names the failure it prevents. If a change makes a contract test fail, the
 contract is the thing to argue with first, not the test.
 
+## The prompt cache
+
+`/cache` reports why the prefix cache missed and what it cost. It should say
+"no prompt-cache breaks recorded" for an ordinary session — a real six-turn run
+holds 99%.
+
+If you are about to change the system prompt, the tool set, or how history is
+serialized, run a few turns and check `/cache` afterwards. An unsanctioned
+break means the prefix drifted, and on a long session that is a 50x price
+difference on every turn that follows.
+
+Anything that rewrites history on purpose must call `CacheTracker.ExpectBreak`
+first, or it reports as a defect and the report starts crying wolf.
+
 ## Evals
 
 `make eval-gate` before anything that touches the loop, the prompt, the tools

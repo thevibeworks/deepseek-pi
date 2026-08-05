@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,17 @@ import (
 
 	"github.com/thevibeworks/deepseek-pi/ai"
 )
+
+// bulkFile generates a large but plausible Go source file.
+func bulkFile(lines int) string {
+	var b strings.Builder
+	b.WriteString("package demo\n\n")
+	for i := range lines {
+		fmt.Fprintf(&b, "// Item%d documents the %dth generated helper in this file.\n", i, i)
+		fmt.Fprintf(&b, "func Item%d(in int) int { return in*%d + %d }\n\n", i, i+1, i)
+	}
+	return b.String()
+}
 
 // requireLive gates the tests that hit the real API. A key alone is not
 // enough: see the note in ai/live_test.go.
@@ -33,6 +45,11 @@ func liveWorkspace(t *testing.T) string {
 	files := map[string]string{
 		"alpha.go": "package demo\n\n// AlphaSecret is 4711.\nconst AlphaSecret = 4711\n",
 		"beta.go":  "package demo\n\n// BetaSecret is 1337.\nconst BetaSecret = 1337\n",
+		// Large enough that reading it leaves a substantial retained tail after
+		// compaction. With a tiny fixture the post-compaction prompt is almost
+		// entirely the still-cached system prompt, so there is no shortfall to
+		// observe and the test would be measuring nothing.
+		"bulk.go": bulkFile(600),
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
@@ -165,4 +182,55 @@ func TestLiveCompactionKeepsSessionWorking(t *testing.T) {
 	if !strings.Contains(answer, "4711") {
 		t.Errorf("the value from before compaction did not survive; answer was:\n%s", answer)
 	}
+}
+
+// TestLiveCacheTrackerSeesCompactionBreak closes the loop on cache
+// attribution: the unit tests prove it names causes correctly, and the manual
+// check proves it stays quiet on a healthy session. This proves it fires on a
+// real break, against the real provider, and labels the one break we choose to
+// take as chosen rather than broken.
+func TestLiveCacheTrackerSeesCompactionBreak(t *testing.T) {
+	dir := liveWorkspace(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+
+	h, err := New(ctx, Options{Cwd: dir, Mode: ModeYolo, NoSkills: true})
+	if err != nil {
+		t.Fatalf("harness: %v", err)
+	}
+	defer func() { _ = h.Close() }()
+
+	// Sized so the retained tail after compaction is real: the shortfall being
+	// measured is what a stable prefix would have served but could not.
+	h.Compactor.Trigger = 0.02 // ~12k tokens
+	h.Compactor.RetainTail = 3000
+
+	if _, err := h.Agent.Prompt(ctx, "Read bulk.go and tell me how many Item functions it defines."); err != nil {
+		t.Fatalf("turn 1: %v", err)
+	}
+	if _, err := h.Agent.Prompt(ctx, "Read alpha.go and state AlphaSecret. Just the number."); err != nil {
+		t.Fatalf("turn 2: %v", err)
+	}
+	if _, err := h.Agent.Prompt(ctx, "Say done."); err != nil {
+		t.Fatalf("turn 3: %v", err)
+	}
+
+	if len(h.Cache.Breaks) == 0 {
+		t.Fatalf("compaction rewrote the transcript but no cache break was recorded\n%s",
+			h.Cache.Report())
+	}
+	var sanctioned int
+	for _, b := range h.Cache.Breaks {
+		if b.Sanctioned {
+			sanctioned++
+			continue
+		}
+		// An UNsanctioned break here means the prefix drifted for a reason we
+		// did not choose, which is exactly what this tool exists to surface.
+		t.Errorf("unexpected cache break: %s", b)
+	}
+	if sanctioned == 0 {
+		t.Error("the compaction break was not labelled as chosen")
+	}
+	t.Logf("cache report:\n%s", h.Cache.Report())
 }

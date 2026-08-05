@@ -323,6 +323,7 @@ func handleCommand(h *harness.Harness, r *renderer, line string, s style) (bool,
   /model [flash|pro]   show or change the model for the next turn
   /effort [off|low|high|xhigh|max]
                        show or change the reasoning level
+  /cache               why the prompt cache missed, and what it cost
   /compact             summarize earlier turns now, freeing context
   /status              session accounting and configuration
   /prompt              print the assembled system prompt
@@ -394,6 +395,9 @@ func handleCommand(h *harness.Harness, r *renderer, line string, s style) (bool,
 		h.Agent.SetEffort(e)
 		fmt.Printf("effort: %s\n", e)
 
+	case "cache":
+		fmt.Print(h.Cache.Report())
+
 	case "compact":
 		actx := h.Agent.Context()
 		before := harness.EstimateTokens(actx.Messages)
@@ -462,6 +466,10 @@ func printStatus(h *harness.Harness, s style) {
 		s.bold, s.reset, u.Input, u.Output, u.CacheRead, u.CacheHitRate()*100)
 	fmt.Printf("%scost%s         $%.4f (cache saved $%.4f)\n",
 		s.bold, s.reset, u.Cost.Total, h.Model.CacheSavings(u))
+	if n := len(h.Cache.Breaks); n > 0 {
+		fmt.Printf("%scache breaks%s %d, %d tokens re-billed (/cache for why)\n",
+			s.bold, s.reset, n, h.Cache.WastedTokens)
+	}
 
 	if len(h.Instructions) > 0 {
 		fmt.Printf("%sinstructions%s\n", s.bold, s.reset)

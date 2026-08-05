@@ -66,6 +66,11 @@ type Harness struct {
 	// can report compactions and force one on demand.
 	Compactor *Compactor
 
+	// Cache explains prompt-cache misses. The prefix cache is what makes long
+	// sessions affordable, so its health should be observable rather than
+	// assumed.
+	Cache *CacheTracker
+
 	// Skills and Instructions are exposed for status output.
 	Skills       []Skill
 	Instructions []InstructionFile
@@ -173,8 +178,12 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 
 	// The compactor shares the parent system prompt so its summarization
 	// request lands on the same cached prefix instead of paying full input
-	// rate for a second one.
+	// rate for a second one. It deliberately uses the RAW stream: attribution
+	// assumes each request extends the previous one, and a summarization call
+	// is a side branch that would read as a break.
 	compactor := NewCompactor(model, client.StreamFunc(ctx), systemPrompt)
+
+	tracker := NewCacheTracker(model)
 
 	cfg := agent.LoopConfig{
 		Model:         model.ID,
@@ -191,15 +200,19 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 		},
 	}
 
-	a := agent.New(actx, cfg, client.StreamFunc(ctx))
+	a := agent.New(actx, cfg, tracker.Wrap(client.StreamFunc(ctx)))
 
 	h := &Harness{
 		Agent: a, Session: session, Client: client,
 		Workspace: ws, Model: model, Policy: policy, Compactor: compactor,
+		Cache:  tracker,
 		Skills: skills, Instructions: instructions,
 	}
 
 	compactor.OnEvent = func(ev CompactionEvent) {
+		// Compaction rewrites history on purpose, so the prefix break it causes
+		// is a cost to report, not a defect to chase.
+		tracker.ExpectBreak("compaction rewrote the transcript")
 		if err := session.RecordCompaction(ev); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not record compaction: %v\n", err)
 		}
