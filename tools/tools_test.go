@@ -494,3 +494,59 @@ func TestWorkspaceResolveAllowsOutsideWhenEnabled(t *testing.T) {
 		t.Errorf("outside path rejected with AllowOutside: %v", err)
 	}
 }
+
+func TestWorkspaceResolveNewPathUnderSymlinkedRoot(t *testing.T) {
+	// Reproduces the macOS failure on any platform: /var is a symlink to
+	// /private/var there, so every temp-dir workspace is reached through a
+	// symlink. Resolving only the root while leaving a not-yet-existing target
+	// unresolved made every file creation look like an escape attempt.
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	w, err := NewWorkspace(link)
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+
+	// A file that does not exist yet, in a directory that does not exist yet.
+	if _, err := w.Resolve("a/b/c.txt"); err != nil {
+		t.Errorf("creating a new file under a symlinked root was rejected: %v", err)
+	}
+	// An existing file still resolves.
+	writeFile(t, w, "here.txt", "x")
+	if _, err := w.Resolve("here.txt"); err != nil {
+		t.Errorf("existing file rejected: %v", err)
+	}
+	// And the scope check still bites for a path that escapes, whether or not
+	// the target exists.
+	if _, err := w.Resolve("../../../etc/nonexistent-escape"); err == nil {
+		t.Error("escape to a non-existent path outside the workspace was allowed")
+	}
+	if _, err := w.Resolve("/etc/hosts"); err == nil {
+		t.Error("absolute escape was allowed")
+	}
+}
+
+func TestWriteThroughSymlinkedRootCreatesFile(t *testing.T) {
+	// End-to-end version of the same bug: the write tool must be able to create
+	// a new file when the workspace root is reached through a symlink.
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	w, err := NewWorkspace(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runTool(t, Write(w), `{"path":"new/dir/file.txt","content":"hi"}`); err != nil {
+		t.Fatalf("write under symlinked root: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(real, "new/dir/file.txt"))
+	if err != nil || string(got) != "hi" {
+		t.Errorf("file not written: %q %v", got, err)
+	}
+}

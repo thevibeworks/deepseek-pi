@@ -65,21 +65,45 @@ func (w *Workspace) Resolve(path string) (string, error) {
 	if w.AllowOutside {
 		return abs, nil
 	}
-	// Compare against the resolved root so a symlinked workspace does not
-	// reject every path inside itself.
+	// Both sides must be resolved before comparison, or a symlinked workspace
+	// rejects paths inside itself. On macOS this is not an edge case: /var is a
+	// symlink to /private/var, so every temp-dir workspace hits it.
 	realRoot, err := filepath.EvalSymlinks(w.Root)
 	if err != nil {
 		realRoot = w.Root
 	}
-	probe := abs
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		probe = resolved
-	}
-	rel, err := filepath.Rel(realRoot, probe)
+	rel, err := filepath.Rel(realRoot, resolveExisting(abs))
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("path %s is outside the workspace (%s)", path, w.Root)
 	}
 	return abs, nil
+}
+
+// resolveExisting resolves symlinks as far up the path as actually exists,
+// then re-appends the components that do not.
+//
+// EvalSymlinks fails outright on a path whose leaf is missing, which is the
+// normal case for a file about to be created. Falling back to the unresolved
+// path would then compare it against a resolved root and reject every new file
+// on any system where the workspace sits under a symlink.
+//
+// Resolving the deepest existing ancestor still closes the escape it guards:
+// the remaining components are pure names, so they cannot traverse anywhere the
+// resolved ancestor does not already reach.
+func resolveExisting(abs string) string {
+	rest := ""
+	current := abs
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			return filepath.Join(resolved, rest)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return abs // reached the root without finding anything that exists
+		}
+		rest = filepath.Join(filepath.Base(current), rest)
+		current = parent
+	}
 }
 
 // Rel renders a path relative to the workspace root for display. Model-facing
