@@ -1,0 +1,36 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - misspell
+    - revive
+    - unconvert
+    - copyloopvar
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          disabled: false
+        - name: package-comments
+          disabled: false
+
+  exclusions:
+    rules:
+      # Tests exercise failure paths where the error is the assertion.
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+
+run:
+  timeout: 5m
