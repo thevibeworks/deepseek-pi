@@ -42,7 +42,13 @@ the same hazard and the same fix.
 **Never cut a transcript where a tool result would lose its call.** The API
 rejects a `tool_result` without a preceding `tool_use` outright. Cut only where
 a real user message begins; retaining more than the budget is fine, retaining
-an orphan is a dead session.
+an orphan is a dead session. Compaction (`findCutPoint`) and branching
+(`harness.Turns`) are the two places that cut, and they follow the same rule.
+
+**The session file is append-only.** Compaction and rewind shrink the context
+*view* and never storage: both append a marker that `LoadSession` replays.
+Deleting lines would destroy the record of what was tried, which is the only
+thing a transcript is for.
 
 **A stream function never returns an error.** Failures are a final assistant
 message with `StopError`. This is what keeps the loop to one failure path.
@@ -72,6 +78,27 @@ same commit. Nothing else classifies them.
 `agent/loop_test.go`. Before changing behaviour there, read the tests — each one
 names the failure it prevents. If a change makes a contract test fail, the
 contract is the thing to argue with first, not the test.
+
+## Branching
+
+`harness/branch.go` turns a transcript into addressable branch points. A turn is
+one user message and everything through to the next; nothing else is a legal
+cut. Two rules to keep in mind when touching it:
+
+Route session writes through `h.session()`, never a captured `*Session`. `Fork`
+swaps the session under the agent's event goroutine, and a callback holding the
+old pointer appends to a closed file — silently, since the error only surfaces
+as a warning.
+
+Report what a discarded turn changed on disk. `Turn.Changed` reads the tool
+*calls*, because a call records what was attempted even when the result errored,
+and shell safety comes from `classifyBash` so a turn that only ran `rg` is not
+flagged. A rewind looks like undo, and a user who believes the files went back
+too will act on a workspace that does not match the conversation.
+
+Branching does not break the prefix cache and must not start to: the retained
+prefix is byte-identical, and the live test asserts no cache break is recorded
+across a rewind or a fork.
 
 ## The prompt cache
 

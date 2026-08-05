@@ -28,6 +28,11 @@ const (
 	// keeps every message; only the view the model sees shrinks, so this marks
 	// where that divergence happened.
 	EntryCompaction EntryKind = "compaction"
+	// EntryRewind records that the context view was cut back to an earlier
+	// point. Same principle as compaction: the file keeps every message and
+	// only the replayed view shrinks, so the transcript still shows the path
+	// that was abandoned.
+	EntryRewind EntryKind = "rewind"
 )
 
 // Entry is one JSONL line.
@@ -50,6 +55,11 @@ type Entry struct {
 	Reclaimed    int    `json:"reclaimedBytes,omitempty"`
 	UsedLLM      bool   `json:"usedLlm,omitempty"`
 	Note         string `json:"note,omitempty"`
+
+	// Retained is how many messages survive a rewind. Zero is a meaningful
+	// value — rewinding to an empty context — and omitempty drops it, which is
+	// harmless only because an absent field unmarshals back to the same zero.
+	Retained int `json:"retained,omitempty"`
 }
 
 // SessionVersion is the on-disk format version.
@@ -67,6 +77,7 @@ type Session struct {
 	path    string
 	cwd     string
 	model   string
+	parent  string
 	created bool
 	file    *os.File
 	writer  *bufio.Writer
@@ -141,6 +152,7 @@ func (s *Session) ensureFile() error {
 	return s.writeEntry(Entry{
 		Kind: EntryHeader, Timestamp: time.Now().UnixMilli(),
 		SessionID: s.id, Cwd: s.cwd, Model: s.model, Version: SessionVersion,
+		Parent: s.parent,
 	})
 }
 
@@ -210,6 +222,57 @@ func (s *Session) RecordCompaction(ev CompactionEvent) error {
 	})
 }
 
+// RecordRewind marks that the context was cut back to the first n messages.
+//
+// Deleting the lines instead would destroy the record of what was tried, which
+// is the one thing a transcript is for. A marker keeps both the history and the
+// view, and LoadSession replays it.
+func (s *Session) RecordRewind(retained int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureFile(); err != nil {
+		return err
+	}
+	return s.writeEntry(Entry{
+		Kind: EntryRewind, Timestamp: time.Now().UnixMilli(), Retained: retained,
+	})
+}
+
+// Fork writes msgs to a NEW session file that records where it branched from.
+//
+// The receiver is untouched, and the copy is a full copy rather than a pointer
+// back to it: a transcript that stops making sense when another file is deleted
+// is not a record. Disk is cheap.
+//
+// Workspace and model come from the parent rather than from the caller, so a
+// branch cannot land in a different session directory than the session it came
+// from — which would quietly hide it from `deepseek-pi -sessions`.
+func (s *Session) Fork(msgs []ai.Message) (*Session, error) {
+	s.mu.Lock()
+	child := NewSession(newID(), s.cwd, s.model)
+	child.parent = s.id
+	// Accounting carries over: the branch continues the same run's spend, and
+	// resetting it would make a forked session look free.
+	child.Usage = s.Usage
+	s.mu.Unlock()
+
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	if err := child.ensureFile(); err != nil {
+		return nil, err
+	}
+	for i := range msgs {
+		m := msgs[i]
+		if err := child.writeEntry(Entry{
+			Kind: EntryMessage, Timestamp: time.Now().UnixMilli(), Message: &m,
+		}); err != nil {
+			_ = child.file.Close()
+			return nil, err
+		}
+	}
+	return child, nil
+}
+
 // Close flushes and closes the file.
 func (s *Session) Close() error {
 	s.mu.Lock()
@@ -234,6 +297,8 @@ type SessionInfo struct {
 	Modified time.Time
 	Messages int
 	Preview  string
+	// Parent is the session this one was forked from, empty if it was not.
+	Parent string
 }
 
 // ListSessions returns stored sessions for a workspace, newest first.
@@ -276,6 +341,16 @@ func summarize(path string) (SessionInfo, error) {
 	}
 
 	info := SessionInfo{Path: path, Modified: stat.ModTime()}
+	// Previews are kept with the message index they came from so a rewind can
+	// drop the ones it discarded. A listing that still advertises a prompt the
+	// session no longer contains sends you into the wrong transcript.
+	type preview struct {
+		at   int
+		text string
+	}
+	var previews []preview
+	count := 0
+
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 16<<20)
 	for sc.Scan() {
@@ -286,13 +361,25 @@ func summarize(path string) (SessionInfo, error) {
 		switch e.Kind {
 		case EntryHeader:
 			info.ID, info.Cwd, info.Model = e.SessionID, e.Cwd, e.Model
+			info.Parent = e.Parent
 			info.Started = time.UnixMilli(e.Timestamp)
 		case EntryMessage:
-			info.Messages++
-			if info.Preview == "" && e.Message != nil && e.Message.Role == ai.RoleUser {
-				info.Preview = firstLine(e.Message.Text(), 80)
+			if e.Message != nil && e.Message.Role == ai.RoleUser {
+				previews = append(previews, preview{at: count, text: firstLine(e.Message.Text(), 80)})
+			}
+			count++
+		case EntryRewind:
+			if e.Retained < count {
+				count = e.Retained
+				for len(previews) > 0 && previews[len(previews)-1].at >= count {
+					previews = previews[:len(previews)-1]
+				}
 			}
 		}
+	}
+	info.Messages = count
+	if len(previews) > 0 {
+		info.Preview = previews[0].text
 	}
 	return info, sc.Err()
 }
@@ -302,6 +389,10 @@ func summarize(path string) (SessionInfo, error) {
 // Streaming partials are never written, so every message on disk is final.
 // Errored assistant turns ARE kept: they are part of what happened, and the
 // provider payload encoder drops them at send time rather than here.
+//
+// Rewind markers are replayed in file order, which is what makes the record and
+// the view separable: the file holds every message ever written, and this
+// returns the view the model was left with.
 func LoadSession(path string) ([]ai.Message, SessionInfo, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -321,6 +412,7 @@ func LoadSession(path string) ([]ai.Message, SessionInfo, error) {
 		switch e.Kind {
 		case EntryHeader:
 			info.ID, info.Cwd, info.Model = e.SessionID, e.Cwd, e.Model
+			info.Parent = e.Parent
 			info.Started = time.UnixMilli(e.Timestamp)
 		case EntryMessage:
 			if e.Message != nil {
@@ -328,6 +420,12 @@ func LoadSession(path string) ([]ai.Message, SessionInfo, error) {
 			}
 		case EntryModelChange:
 			info.Model = e.Model
+		case EntryRewind:
+			// Guard against a file that claims to retain more than it holds,
+			// which a truncated write or a newer format version could produce.
+			if e.Retained < len(msgs) {
+				msgs = msgs[:e.Retained]
+			}
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -349,6 +447,7 @@ func ResumeSession(path string) (*Session, []ai.Message, error) {
 	}
 	s := &Session{
 		id: info.ID, path: path, cwd: info.Cwd, model: info.Model,
+		parent:  info.Parent,
 		created: true, file: f, writer: bufio.NewWriter(f),
 	}
 	// Usage on resumed assistant messages is deliberately NOT re-accumulated:

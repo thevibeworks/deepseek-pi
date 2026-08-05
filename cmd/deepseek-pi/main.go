@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -328,6 +329,9 @@ func handleCommand(h *harness.Harness, r *renderer, line string, s style) (bool,
                        show or change the reasoning level
   /cache               why the prompt cache missed, and what it cost
   /compact             summarize earlier turns now, freeing context
+  /turns               list the turns you can rewind or fork at
+  /rewind [N]          drop turn N and everything after (default: the last)
+  /fork [N]            branch into a copy cut before turn N, original kept
   /status              session accounting and configuration
   /prompt              print the assembled system prompt
   /session             path to this session's transcript
@@ -412,6 +416,24 @@ func handleCommand(h *harness.Harness, r *renderer, line string, s style) (bool,
 		}
 		actx.Messages = update.Context.Messages
 
+	case "turns":
+		printTurns(h, s)
+
+	case "rewind", "fork":
+		n, err := parseTurn(arg)
+		if err != nil {
+			return false, err
+		}
+		branch := h.Rewind
+		if cmd == "fork" {
+			branch = h.Fork
+		}
+		rep, err := branch(n)
+		if err != nil {
+			return false, err
+		}
+		printBranch(rep, s)
+
 	case "status":
 		printStatus(h, s)
 
@@ -439,6 +461,79 @@ func handleCommand(h *harness.Harness, r *renderer, line string, s style) (bool,
 		return false, fmt.Errorf("unknown command /%s (try /help)", cmd)
 	}
 	return false, nil
+}
+
+// parseTurn reads an optional turn number. Empty means "the default one for
+// this command", which Rewind and Fork each interpret for themselves.
+func parseTurn(arg string) (int, error) {
+	if arg == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(arg)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("turn must be a positive number, got %q (/turns lists them)", arg)
+	}
+	return n, nil
+}
+
+func printTurns(h *harness.Harness, s style) {
+	turns := harness.Turns(h.Agent.Context().Messages)
+	if len(turns) == 0 {
+		fmt.Printf("%sno turns yet%s\n", s.dim, s.reset)
+		return
+	}
+	changed := false
+	for _, t := range turns {
+		mark := " "
+		if t.Changed() {
+			mark, changed = "*", true
+		}
+		label := t.Prompt
+		if t.Synthetic {
+			label = s.dim + "(compacted summary)" + s.reset
+		}
+		fmt.Printf("%s%3d%s %s %s\n", s.bold, t.Number, s.reset, mark, label)
+	}
+	if changed {
+		fmt.Printf("%s* changed files or ran commands%s\n", s.dim, s.reset)
+	}
+	fmt.Printf("%s/rewind N drops turn N onward; /fork N branches before it%s\n", s.dim, s.reset)
+}
+
+// printBranch reports a rewind or fork, and says plainly what it did not undo.
+//
+// The workspace warning is not a footnote. Rewinding looks like undo, and a
+// user who believes the files went back too will act on a workspace that does
+// not match the conversation.
+func printBranch(rep harness.BranchReport, s style) {
+	where := fmt.Sprintf("before turn %d", rep.Turn)
+	if rep.Turn == 0 {
+		where = "at the current point"
+	}
+	verb := "rewound to"
+	if rep.Forked {
+		verb = "forked"
+	}
+	fmt.Printf("%s %s — %d turn(s) kept, %d dropped\n",
+		verb, where, rep.Retained, len(rep.Discarded))
+	if rep.Forked {
+		fmt.Printf("%snow writing %s; the branch you left is unchanged%s\n",
+			s.dim, rep.Session, s.reset)
+	}
+
+	changed := rep.Changed()
+	if len(changed) == 0 {
+		return
+	}
+	fmt.Printf("%sthe conversation went back; the workspace did not:%s\n", s.yellow, s.reset)
+	for _, t := range changed {
+		for _, path := range t.Wrote {
+			fmt.Printf("  turn %d wrote %s\n", t.Number, path)
+		}
+		for _, cmd := range t.Ran {
+			fmt.Printf("  turn %d ran  %s\n", t.Number, cmd)
+		}
+	}
 }
 
 func printStatus(h *harness.Harness, s style) {
@@ -537,6 +632,9 @@ func printSessions(cwd string) error {
 		fmt.Printf("%s  %-19s  %3d msg  %s\n",
 			s.ID, s.Modified.Format(time.DateTime), s.Messages, s.Preview)
 		fmt.Printf("  %s\n", s.Path)
+		if s.Parent != "" {
+			fmt.Printf("  forked from %s\n", s.Parent)
+		}
 	}
 	return nil
 }

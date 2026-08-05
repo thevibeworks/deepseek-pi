@@ -92,6 +92,24 @@ func (h *Harness) Children() []ChildReport {
 	return append([]ChildReport(nil), h.children...)
 }
 
+// session returns the transcript currently being written.
+//
+// Fork replaces it, so anything running off the agent's event goroutine has to
+// read it through the lock rather than capturing the pointer once — a callback
+// holding the pre-fork session would keep appending to a closed file.
+func (h *Harness) session() *Session {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.Session
+}
+
+// setSession swaps the transcript being written. Fork is the only caller.
+func (h *Harness) setSession(s *Session) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.Session = s
+}
+
 // New assembles a harness.
 //
 // Assembly order matters in one place: the system prompt is built AFTER the
@@ -247,7 +265,7 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 		// Compaction rewrites history on purpose, so the prefix break it causes
 		// is a cost to report, not a defect to chase.
 		tracker.ExpectBreak("compaction rewrote the transcript")
-		if err := session.RecordCompaction(ev); err != nil {
+		if err := h.session().RecordCompaction(ev); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not record compaction: %v\n", err)
 		}
 	}
@@ -258,7 +276,7 @@ func New(ctx context.Context, opts Options) (*Harness, error) {
 		if ev.Type != agent.EventMessageEnd || ev.Message == nil {
 			return
 		}
-		if err := session.Append(*ev.Message); err != nil {
+		if err := h.session().Append(*ev.Message); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not write session: %v\n", err)
 		}
 	})

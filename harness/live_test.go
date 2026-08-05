@@ -295,3 +295,116 @@ func TestLiveSubagentDelegation(t *testing.T) {
 			c.Duration.Round(time.Millisecond))
 	}
 }
+
+// TestLiveBranchingKeepsTheSessionWorking is the end-to-end check for rewind
+// and fork against the real provider.
+//
+// Two claims are being tested, and both are claims the unit tests cannot make.
+// First, that a cut-back transcript is still a payload DeepSeek accepts: the
+// turn boundary is supposed to guarantee no tool_result is left without its
+// tool_use, and the provider is the only authority on that. Second, that
+// branching is cheap — the retained prefix is byte-identical, so it should come
+// straight back out of the prompt cache instead of being re-billed at 50x.
+func TestLiveBranchingKeepsTheSessionWorking(t *testing.T) {
+	dir := liveWorkspace(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+
+	h, err := New(ctx, Options{Cwd: dir, Mode: ModeYolo, NoSkills: true})
+	if err != nil {
+		t.Fatalf("harness: %v", err)
+	}
+	defer func() { _ = h.Close() }()
+
+	// A real transcript with tool calls in it, so the cut has something it could
+	// plausibly break. bulk.go makes the prefix big enough that a cache miss
+	// would be unmistakable rather than lost in rounding.
+	for i, prompt := range []string{
+		"Read alpha.go and tell me the value of AlphaSecret. Just the number.",
+		"Read bulk.go and tell me how many Item functions it defines. Just the number.",
+		"Read beta.go and tell me BetaSecret. Just the number.",
+	} {
+		if _, err := h.Agent.Prompt(ctx, prompt); err != nil {
+			t.Fatalf("turn %d: %v", i+1, err)
+		}
+	}
+
+	turns := Turns(h.Agent.Context().Messages)
+	if len(turns) != 3 {
+		t.Fatalf("expected 3 turns before branching, got %d", len(turns))
+	}
+	breaksBefore := len(h.Cache.Breaks)
+
+	// Rewind the last turn away, then ask something else from that point.
+	rep, err := h.Rewind(3)
+	if err != nil {
+		t.Fatalf("Rewind: %v", err)
+	}
+	t.Logf("rewind: %d turns kept, %d dropped", rep.Retained, len(rep.Discarded))
+	assertNoOrphanToolResults(t, h.Agent.Context().Messages)
+
+	msgs, err := h.Agent.Prompt(ctx, "Without reading anything again, what was AlphaSecret?")
+	if err != nil {
+		t.Fatalf("post-rewind turn: %v", err)
+	}
+	answer := ""
+	for _, m := range msgs {
+		if m.StopReason == ai.StopError {
+			t.Fatalf("post-rewind turn failed: %s", m.ErrorMessage)
+		}
+		answer += m.Text()
+	}
+	if !strings.Contains(answer, "4711") {
+		t.Errorf("the retained prefix did not survive the rewind; answer was:\n%s", answer)
+	}
+
+	// The economic claim. Truncating a prefix does not invalidate it, so the
+	// turn after a rewind should hit cache like any other turn.
+	if got := len(h.Cache.Breaks); got != breaksBefore {
+		for _, b := range h.Cache.Breaks[breaksBefore:] {
+			t.Errorf("rewind cost a cache break: %s", b)
+		}
+	}
+	last := h.Agent.Context().Messages[len(h.Agent.Context().Messages)-1]
+	t.Logf("post-rewind usage: input %d, cache read %d (%.0f%% hit)",
+		last.Usage.Input, last.Usage.CacheRead, last.Usage.CacheHitRate()*100)
+
+	// Now fork, and confirm the branch is a working session with its own file.
+	breaksBefore = len(h.Cache.Breaks)
+	parentPath := h.Session.Path()
+	forkRep, err := h.Fork(0)
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if _, err := h.Agent.Prompt(ctx, "And what was BetaSecret? Do not read any files."); err != nil {
+		t.Fatalf("post-fork turn: %v", err)
+	}
+	if got := len(h.Cache.Breaks); got != breaksBefore {
+		for _, b := range h.Cache.Breaks[breaksBefore:] {
+			t.Errorf("fork cost a cache break: %s", b)
+		}
+	}
+
+	// The branch records the new work and the parent is left as it was.
+	if err := h.Session.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	branch, info, err := LoadSession(forkRep.Session)
+	if err != nil {
+		t.Fatalf("LoadSession(branch): %v", err)
+	}
+	if info.Parent == "" {
+		t.Error("the branch does not record where it came from")
+	}
+	parent, _, err := LoadSession(parentPath)
+	if err != nil {
+		t.Fatalf("LoadSession(parent): %v", err)
+	}
+	if len(branch) <= len(parent) {
+		t.Errorf("branch has %d messages and the parent %d; the new turn did not land in the branch",
+			len(branch), len(parent))
+	}
+	t.Logf("session cost: $%.4f, %d in / %d out, %.0f%% cache",
+		h.Session.Usage.Cost.Total, h.Session.Usage.Input, h.Session.Usage.Output,
+		h.Session.Usage.CacheHitRate()*100)
+}

@@ -53,8 +53,51 @@ deepseek-pi -show-prompt         print the assembled system prompt
 ```
 
 Slash commands in an interactive session: `/mode`, `/model`, `/effort`,
-`/compact`, `/cache`, `/status`, `/prompt`, `/session`, `/thinking`, `/clear`,
-`/exit`.
+`/compact`, `/cache`, `/turns`, `/rewind`, `/fork`, `/status`, `/prompt`,
+`/session`, `/thinking`, `/clear`, `/exit`.
+
+## Branching
+
+A session that went down a wrong path has two moves. `/rewind` drops the last
+turn (or `/rewind N`, any turn) from the conversation; `/fork` copies the
+session at that point into a new one and continues there, leaving the branch
+you left untouched. `/turns` lists the points you can cut at.
+
+```
+$ /turns
+  1   what does the parser do?
+  2 * fix the off-by-one
+  3   now add a benchmark
+* changed files or ran commands
+
+$ /rewind 2
+rewound to before turn 2 — 1 turn(s) kept, 2 dropped
+the conversation went back; the workspace did not:
+  turn 2 wrote parser.go
+  turn 2 ran  go test ./...
+```
+
+Three things make this correct rather than a text-editor undo:
+
+**You can only cut at a turn boundary.** A tool call and its result are a
+matched pair the provider rejects if split, so a user message is the only place
+the transcript is unambiguously complete. That is the same rule compaction's
+`findCutPoint` follows.
+
+**The file is never rewritten.** A rewind appends a marker and `LoadSession`
+replays it, so the transcript still records the path you abandoned while the
+context the model sees goes back. Storage and view are separate, exactly as
+they already are for compaction.
+
+**It does not undo anything outside the conversation.** Files written stay
+written. The report names them rather than letting you assume otherwise —
+that's the `*` in `/turns` and the warning above, and read-only commands are
+excluded via the same classifier the permission gate uses, so `rg` is not
+reported as a change.
+
+Branching is nearly free, because a truncated prefix is still a cached prefix.
+Measured against the live API, the turn after a cut read 17792 of 17809 input
+tokens from cache; the 17 uncached tokens were the new prompt itself.
 
 ## Sub-agents
 
@@ -336,8 +379,8 @@ should stay that way.
 ## Status
 
 Early. The loop, tools, permissions, compaction, sessions, accounting and the
-eval harness, cache-break attribution and sub-agents work and are tested
-against the live API. Not yet built: branching sessions, a scheduler, and a
+eval harness, cache-break attribution, sub-agents and session branching work
+and are tested against the live API. Not yet built: a scheduler and a
 full-screen TUI.
 
 ## License
