@@ -215,6 +215,40 @@ a := agent.New(
 msgs, err := a.Prompt(ctx, "do the thing")
 ```
 
+## Evals
+
+Engine changes are supposed to be gated on numbers rather than argument, so
+there is a harness for producing them.
+
+```
+make eval          # run the suite
+make eval-gate     # run it and compare against the committed baseline
+make eval-baseline # record a new baseline from a known-good tree
+```
+
+A task is a directory: a workspace to copy, a prompt, and a command that must
+exit zero. The verifier is a real command on purpose — "did the tests pass" is
+a fact, "does the diff look right" is an opinion, and an eval built on opinions
+cannot gate anything. Verifiers restore their own canonical test files from
+`$EVAL_TASK_DIR` before checking, so a task cannot be passed by deleting the
+test.
+
+The gate calibrates itself to noise, because that noise is larger than you
+would guess. Two consecutive runs of an *unchanged* agent over the same three
+tasks differed by 24% on input tokens and 42% on output tokens — the model
+simply words things differently and takes a different number of turns. So a
+single sample per task cannot gate efficiency at all: `-repeat 3` compares
+medians, a task counts as passed only if every repeat passed, and the tolerance
+is the larger of a 25% floor and the spread measured inside the baseline's own
+repeats. Correctness has no tolerance.
+
+Current baseline (flash, 3 repeats, medians):
+
+```
+3/3 passed · 34972 in / 2736 out · cache 85% · $0.0017 · 27s
+widest input-token spread within a task: 26%
+```
+
 ## Development
 
 ```
@@ -234,9 +268,9 @@ should stay that way.
 
 ## Status
 
-Early. The loop, tools, permissions, compaction, sessions and accounting work
-and are tested against the live API. Not yet built: sub-agents, an eval
-harness, a scheduler, and a full-screen TUI.
+Early. The loop, tools, permissions, compaction, sessions, accounting and the
+eval harness work and are tested against the live API. Not yet built:
+sub-agents, cache-break attribution, a scheduler, and a full-screen TUI.
 
 ## License
 

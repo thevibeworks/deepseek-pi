@@ -1,0 +1,6 @@
+{
+  "name": "fix-offbyone",
+  "prompt": "Run the tests. One is failing. Find the bug in the source and fix it. Do not change the test file.",
+  "verify": "cp \"$EVAL_TASK_DIR/verify/stats_test.go\" stats_test.go && go test ./...",
+  "timeoutSeconds": 240
+}

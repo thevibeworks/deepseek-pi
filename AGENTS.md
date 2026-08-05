@@ -73,6 +73,19 @@ same commit. Nothing else classifies them.
 names the failure it prevents. If a change makes a contract test fail, the
 contract is the thing to argue with first, not the test.
 
+## Evals
+
+`make eval-gate` before anything that touches the loop, the prompt, the tools
+or the context engine. It costs a few cents.
+
+Do not tighten `MinTolerance` because a number looks loose. It is 25% because
+the measured spread between two runs of an unchanged agent was 24-42%, and a
+gate that fires on noise gets ignored. If you want a tighter gate, raise
+`-repeat` — more samples, not a smaller tolerance.
+
+Only record a new baseline from a tree you believe is good, and say in the
+commit message why the numbers moved.
+
 ## Before committing
 
 ```

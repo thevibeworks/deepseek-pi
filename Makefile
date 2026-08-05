@@ -27,6 +27,18 @@ test-race: ## Unit tests under the race detector
 test-live: ## Tests that hit the real API; needs DEEPSEEK_API_KEY. Costs a few cents.
 	DEEPSEEK_PI_LIVE=1 go test ./... -run TestLive -v -count=1
 
+.PHONY: eval
+eval: ## Run the benchmark suite (costs a few cents)
+	go run ./cmd/dspi-eval -repeat 3
+
+.PHONY: eval-gate
+eval-gate: ## Run the suite and gate it against the committed baseline
+	go run ./cmd/dspi-eval -repeat 3 -baseline eval/baseline-flash.json
+
+.PHONY: eval-baseline
+eval-baseline: ## Record a new baseline. Only from a known-good tree.
+	go run ./cmd/dspi-eval -repeat 3 -out eval/baseline-flash.json
+
 .PHONY: cover
 cover: ## Coverage report
 	go test -coverprofile=coverage.out ./...

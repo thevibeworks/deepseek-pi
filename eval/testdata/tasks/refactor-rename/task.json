@@ -1,0 +1,6 @@
+{
+  "name": "refactor-rename",
+  "prompt": "Rename store.Fetch to store.Get and store.ErrNoRecord to store.ErrNotFound across the whole module, including every call site. Keep behaviour identical and make sure the code still builds.",
+  "verify": "cp \"$EVAL_TASK_DIR/verify/rename_test.go\" rename_test.go && go vet ./... && go test ./...",
+  "timeoutSeconds": 300
+}

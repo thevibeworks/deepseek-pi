@@ -1,0 +1,6 @@
+{
+  "name": "implement-parser",
+  "prompt": "Implement Parse in kv.go. Rules: each non-empty line is key=value; surrounding whitespace on the key and value is trimmed; lines starting with # are comments and are skipped; blank lines are skipped; only the FIRST '=' splits the pair, so a value may contain '='; a non-comment, non-blank line with no '=' is an error. Then write a test file covering these rules and make sure the tests pass.",
+  "verify": "cp \"$EVAL_TASK_DIR/verify/kv_test.go\" kv_test.go && go test ./...",
+  "timeoutSeconds": 300
+}
