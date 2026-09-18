@@ -6,6 +6,7 @@ import "time"
 // bills on one of the two.
 type Tier string
 
+// The two rows of the card.
 const (
 	TierFlash Tier = "flash"
 	TierPro   Tier = "pro"
