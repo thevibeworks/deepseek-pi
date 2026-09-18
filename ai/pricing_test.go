@@ -57,12 +57,15 @@ func TestRatesAtEachBoundary(t *testing.T) {
 		{"flat card, no peak even in a later peak hour", flash, "2026-08-12T02:00:00Z", Rates{0.0028, 0.14, 0.28}},
 		{"V4 peak ran on Saturdays before the weekend rule", flash, "2026-08-22T02:00:00Z", Rates{0.014, 0.44, 1.32}},
 		{"V4 Saturday after the weekend rule is off-peak", flash, "2026-08-29T02:00:00Z", Rates{0.007, 0.22, 0.66}},
-		{"last minute of the V4 card", flash, "2026-09-10T10:59:00Z", Rates{0.007, 0.22, 0.66}},
-		{"first minute of the V4.1 card", flash, "2026-09-10T11:00:00Z", Rates{0.003, 0.15, 0.6}},
+		// 03:59 sits in the 01-04 peak window and 04:00 does not, so the card
+		// switch and the tariff switch are both proven at one boundary.
+		{"last minute of the V4 card, at peak", flash, "2026-09-10T03:59:00Z", Rates{0.014, 0.44, 1.32}},
+		{"first minute of the V4.1 card, off-peak", flash, "2026-09-10T04:00:00Z", Rates{0.003, 0.15, 0.6}},
+		{"the old page lagged: 04:50 UTC was already V4.1", flash, "2026-09-10T04:50:00Z", Rates{0.003, 0.15, 0.6}},
 		{"V4.1 weekday peak", flash, "2026-09-14T01:00:00Z", Rates{0.006, 0.3, 1.2}},
 		{"peak end is exclusive", flash, "2026-09-14T04:00:00Z", Rates{0.003, 0.15, 0.6}},
 		{"V4.1 Sunday in a peak hour", flash, "2026-09-13T02:00:00Z", Rates{0.003, 0.15, 0.6}},
-		{"pro before V4.1", pro, "2026-09-10T10:59:00Z", Rates{0.022, 0.66, 1.98}},
+		{"pro before V4.1", pro, "2026-09-10T03:59:00Z", Rates{0.044, 1.32, 3.96}},
 		{"pro unchanged after V4.1", pro, "2026-09-15T12:00:00Z", Rates{0.022, 0.66, 1.98}},
 	}
 	for _, c := range cases {
