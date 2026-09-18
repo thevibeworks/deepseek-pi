@@ -745,14 +745,21 @@ func printStatus(h *harness.Harness, s style) {
 }
 
 func printModels() error {
+	now := time.Now()
 	fmt.Printf("%-20s %-22s %10s %10s %12s %12s %12s\n",
 		"ID", "NAME", "CONTEXT", "OUTPUT", "$/M CACHED", "$/M INPUT", "$/M OUTPUT")
 	for _, m := range ai.Models() {
+		r := m.RatesAt(now)
 		fmt.Printf("%-20s %-22s %10d %10d %12.4f %12.4f %12.4f\n",
-			m.ID, m.Name, m.ContextWindow, m.MaxTokens,
-			m.Rates.CacheRead, m.Rates.Input, m.Rates.Output)
+			m.ID, m.Name, m.ContextWindow, m.MaxTokens, r.CacheRead, r.Input, r.Output)
 	}
-	fmt.Printf("\nCONTEXT is the usable input budget; both models advertise %d.\n",
+	period := "off-peak"
+	if ai.IsPeak(now) {
+		period = "peak"
+	}
+	fmt.Printf("\nRates are the %s card, %s now; peak (01-04 and 06-10 UTC, Mon-Fri) is 2x off-peak.\n",
+		ai.CardAt(now).Label, period)
+	fmt.Printf("CONTEXT is the usable input budget; both models advertise %d.\n",
 		ai.Models()[0].AdvertisedWindow)
 	return nil
 }

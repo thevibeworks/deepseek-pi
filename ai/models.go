@@ -1,12 +1,28 @@
 package ai
 
-import "strings"
-
-// Model ids served by api.deepseek.com.
-const (
-	ModelFlash = "deepseek-v4-flash"
-	ModelPro   = "deepseek-v4-pro"
+import (
+	"strings"
+	"time"
 )
+
+// Model ids served by api.deepseek.com, exactly the two GET /models lists
+// since 2026-09-10.
+const (
+	// ModelFlash is DeepSeek-V4.1-Flash, released 2026-09-10. It is a floating
+	// alias: DeepSeek can move it to a newer Flash without a new name.
+	ModelFlash = "deepseek-flash"
+	// ModelPro is DeepSeek-V4-Pro-0813. It continues after 2026-09-14 with
+	// billing unchanged (changelog 2026-09-10).
+	ModelPro = "deepseek-v4-pro"
+)
+
+// retiredFlash are names the API still accepts for models it retired on
+// 2026-09-10. Their requests are served by V4.1 Flash and billed at the Flash
+// price, so they resolve to ModelFlash here too.
+var retiredFlash = map[string]bool{
+	"deepseek-v4-flash":            true,
+	"deepseek-v4-flash-vision-exp": true,
+}
 
 // DefaultBaseURL is the DeepSeek API root. The Anthropic-compatible Messages
 // endpoint hangs off /anthropic/v1/messages.
@@ -39,6 +55,8 @@ type Rates struct {
 	Output float64
 }
 
+// The rates themselves are dated cards: see pricing.go.
+
 // Model is everything the harness needs to know about a DeepSeek model.
 //
 // The numbers here are the real ones, not the advertised ones. v4 advertises a
@@ -57,19 +75,20 @@ type Model struct {
 	MaxTokens        int
 	Reasoning        bool
 	Efforts          []Effort
-	Rates            Rates
+	// Tier picks the rate-card row; the rates depend on when the call ran.
+	Tier Tier
 }
 
 var catalog = map[string]Model{
 	ModelFlash: {
 		ID:               ModelFlash,
-		Name:             "DeepSeek V4 Flash",
+		Name:             "DeepSeek V4.1 Flash",
 		ContextWindow:    616_000,
 		AdvertisedWindow: 1_000_000,
 		MaxTokens:        384_000,
 		Reasoning:        true,
 		Efforts:          []Effort{EffortLow, EffortHigh, EffortXHigh, EffortMax},
-		Rates:            Rates{CacheRead: 0.0028, Input: 0.14, Output: 0.28},
+		Tier:             TierFlash,
 	},
 	ModelPro: {
 		ID:               ModelPro,
@@ -79,12 +98,12 @@ var catalog = map[string]Model{
 		MaxTokens:        384_000,
 		Reasoning:        true,
 		Efforts:          []Effort{EffortLow, EffortHigh, EffortXHigh, EffortMax},
-		Rates:            Rates{CacheRead: 0.003625, Input: 0.435, Output: 0.87},
+		Tier:             TierPro,
 	},
 }
 
 // Models returns the catalog in a stable order: flash first, since it is the
-// default executor and the one a cost-conscious loop should reach for.
+// default for every role.
 func Models() []Model { return []Model{catalog[ModelFlash], catalog[ModelPro]} }
 
 // Lookup resolves a model id to its profile.
@@ -96,6 +115,9 @@ func Models() []Model { return []Model{catalog[ModelFlash], catalog[ModelPro]} }
 func Lookup(id string) (Model, bool) {
 	if m, ok := catalog[id]; ok {
 		return m, true
+	}
+	if retiredFlash[id] {
+		return catalog[ModelFlash], true
 	}
 	switch {
 	case strings.HasPrefix(id, "claude-opus"):
@@ -133,12 +155,16 @@ func (m Model) SupportsEffort(e Effort) bool {
 // Always compute cost here from provider-reported tokens. Never trust a cost
 // field returned by a provider or another harness, including a previous version
 // of this one: token counts are facts, cost fields are somebody's arithmetic.
-func (m Model) Price(u Usage) Cost {
+func (m Model) Price(u Usage) Cost { return m.PriceAt(u, time.Now()) }
+
+// PriceAt computes cost on the card and period in force at t.
+func (m Model) PriceAt(u Usage, t time.Time) Cost {
 	const perMillion = 1_000_000.0
+	r := m.RatesAt(t)
 	c := Cost{
-		CacheRead: float64(u.CacheRead) * m.Rates.CacheRead / perMillion,
-		Input:     float64(u.CacheMiss()) * m.Rates.Input / perMillion,
-		Output:    float64(u.Output) * m.Rates.Output / perMillion,
+		CacheRead: float64(u.CacheRead) * r.CacheRead / perMillion,
+		Input:     float64(u.CacheMiss()) * r.Input / perMillion,
+		Output:    float64(u.Output) * r.Output / perMillion,
 	}
 	c.Total = c.CacheRead + c.Input + c.Output
 	return c
@@ -150,5 +176,6 @@ func (m Model) Price(u Usage) Cost {
 // history per turn.
 func (m Model) CacheSavings(u Usage) float64 {
 	const perMillion = 1_000_000.0
-	return float64(u.CacheRead) * (m.Rates.Input - m.Rates.CacheRead) / perMillion
+	r := m.RatesAt(time.Now())
+	return float64(u.CacheRead) * (r.Input - r.CacheRead) / perMillion
 }

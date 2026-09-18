@@ -221,7 +221,7 @@ func fakeProvider(t *testing.T) (*httptest.Server, func() int) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		if id >= providerBailout {
 			fmt.Fprint(w, sse("message_start", fmt.Sprintf(
-				`{"type":"message_start","message":{"id":"msg_%d","model":"deepseek-v4-flash",`+
+				`{"type":"message_start","message":{"id":"msg_%d","model":"deepseek-flash",`+
 					`"usage":{"input_tokens":1000,"output_tokens":0}}}`, id)))
 			fmt.Fprint(w, sse("content_block_start",
 				`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`))
@@ -235,7 +235,7 @@ func fakeProvider(t *testing.T) (*httptest.Server, func() int) {
 			return
 		}
 		fmt.Fprint(w, sse("message_start", fmt.Sprintf(
-			`{"type":"message_start","message":{"id":"msg_%d","model":"deepseek-v4-flash",`+
+			`{"type":"message_start","message":{"id":"msg_%d","model":"deepseek-flash",`+
 				`"usage":{"input_tokens":1000,"output_tokens":0,"cache_read_input_tokens":0}}}`, id)))
 		fmt.Fprint(w, sse("content_block_start",
 			`{"type":"content_block_start","index":0,`+

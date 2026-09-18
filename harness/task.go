@@ -27,17 +27,16 @@ const (
 	RoleExplorer Role = "explorer"
 	// RoleImplementer makes changes in the workspace.
 	RoleImplementer Role = "implementer"
-	// RoleReviewer reads and judges. It runs on pro, because judgment is the
-	// one job where the cheaper model is a false economy.
+	// RoleReviewer reads and judges. It ran on pro until V4.1 Flash
+	// (2026-09-10); see the README's model section for why it no longer does.
 	RoleReviewer Role = "reviewer"
 	// RoleTester runs commands and reports what happened.
 	RoleTester Role = "tester"
 )
 
 type rolePreset struct {
-	prompt   string
-	mode     Mode
-	proModel bool
+	prompt string
+	mode   Mode
 }
 
 var rolePresets = map[Role]rolePreset{
@@ -62,7 +61,7 @@ what you ran to prove it works. If you could not finish, say exactly where you
 stopped and why.`,
 	},
 	RoleReviewer: {
-		mode: ModePlan, proModel: true,
+		mode: ModePlan,
 		prompt: `You are a reviewer sub-agent. Your job is to judge work, not to change it.
 
 You cannot modify anything. Read the relevant code and form an opinion with
@@ -163,7 +162,7 @@ func newTaskTool(env *taskEnv) agent.Tool {
 		Description: fmt.Sprintf(
 			"Delegate a self-contained piece of work to a sub-agent with its own context.\n"+
 				"Roles: %s. explorer and tester and reviewer cannot modify anything; "+
-				"implementer can. reviewer runs on the stronger model.\n"+
+				"implementer can.\n"+
 				"The sub-agent starts with NO knowledge of this conversation, so the prompt must "+
 				"be self-contained. You receive only its final report, never its tool output.\n"+
 				"Use this to keep a large search or an independent subtask out of your own context. "+
@@ -232,9 +231,6 @@ func runChild(
 	defer cancel()
 
 	model := env.parentModel
-	if preset.proModel {
-		model = ai.MustLookup(ai.ModelPro)
-	}
 
 	// The child is bounded by the STRICTER of its role and its parent. A plan-
 	// mode parent must not be able to write through an implementer child, or
