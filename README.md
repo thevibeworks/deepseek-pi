@@ -1,7 +1,7 @@
 # deepseek-pi
 
-A coding agent for the DeepSeek v4 series, in Go. Single binary, zero runtime
-services, one dependency.
+A coding agent for DeepSeek, in Go, defaulting to DeepSeek-V4.1-Flash
+(`deepseek-flash`). Single binary, zero runtime services, one dependency.
 
 The architecture is borrowed from the [Pi agent harness][pi] — its loop
 contracts, tool-output discipline, and prompt-cache invariants are the parts of
@@ -46,7 +46,7 @@ deepseek-pi                      interactive session
 deepseek-pi -p "prompt"          run once and exit
 deepseek-pi "prompt"             same, positional
 deepseek-pi -c                   continue the most recent session here
-deepseek-pi -m pro -e high ...   pro model, high reasoning effort
+deepseek-pi -e high ...          high reasoning effort (model: deepseek-flash)
 deepseek-pi -plan                read-only: investigate and propose
 deepseek-pi -max-cost 2.50       stop the run after $2.50
 deepseek-pi -max-turns 40        stop one request after 40 turns
@@ -54,6 +54,28 @@ deepseek-pi -sessions            list stored sessions
 deepseek-pi -prune               drop checkpoint data no session refers to
 deepseek-pi -show-prompt         print the assembled system prompt
 ```
+
+## Models
+
+| `-m` | model | off-peak USD / 1M (hit / miss / out) |
+|---|---|---|
+| `flash` (default) | `deepseek-flash`, DeepSeek-V4.1-Flash | 0.003 / 0.15 / 0.60 |
+| `pro` | `deepseek-v4-pro`, DeepSeek-V4-Pro-0813 | 0.022 / 0.66 / 1.98 |
+
+Peak (01:00-04:00 and 06:00-10:00 UTC, Monday to Friday) costs double, and
+`deepseek-pi -models` prints the card in force now. Costs are computed on
+the dated card in force when the response arrived; superseded cards are kept
+in `ai/pricing.go`. The retired names `deepseek-v4-flash` and
+`deepseek-v4-flash-vision-exp` are still accepted, as the API still accepts
+them, and resolve to `deepseek-flash`, which serves and bills them.
+
+Flash is the default for the session and for every sub-agent role. DeepSeek's
+own changelog is the reason: on the benchmarks both its 2026-09-10 (V4.1
+Flash) and 2026-08-13 (V4 Pro GA) entries report, Flash scores Terminal Bench
+2.1 90.6 vs 87.9, NL2Repo 65.4 vs 61.5, CyberGym 88.1 vs 83.3 and HLE with
+tools 63.9 vs 60.0; HLE without tools goes the other way, 36.8 vs 42.7. Pro
+stays selectable with `-m pro` or `/model pro`. The committed eval baseline
+below was recorded on V4 Flash and has not been re-run on V4.1.
 
 Slash commands in an interactive session: `/mode`, `/model`, `/effort`,
 `/compact`, `/cache`, `/budget`, `/turns`, `/rewind`, `/fork`, `/status`,
@@ -134,12 +156,15 @@ context. The parent receives only the final report — never the child's tool
 output — which is the entire point: a broad search costs the parent one report
 instead of forty file reads.
 
-| role | can modify | model |
-|---|---|---|
-| `explorer` | no | flash |
-| `tester` | no | flash |
-| `reviewer` | no | **pro** — judgment is the one job where the cheap model is a false economy |
-| `implementer` | yes | flash |
+| role | can modify |
+|---|---|
+| `explorer` | no |
+| `tester` | no |
+| `reviewer` | no |
+| `implementer` | yes |
+
+Every role runs on the parent's model. `reviewer` ran on pro until V4.1
+Flash; see [Models](#models) for why it no longer does.
 
 Sub-agents run **concurrently** when the model batches them, get their own
 transcript on disk, and are bounded by a budget (30 turns, 200k tokens, 5
@@ -279,8 +304,8 @@ provider-reported token counts against our own rate card — never from a
 provider or harness cost field. Retargeted Claude harnesses misprice DeepSeek
 by roughly 13x because they apply Claude rate cards to DeepSeek tokens.
 
-**The prompt never drifts.** Cached input runs 0.0028/M against 0.14/M for a
-miss — a 50x swing — and the cache re-bills the entire prompt when one byte
+**The prompt never drifts.** Cached input runs 0.003/M against 0.15/M for a
+miss on V4.1 Flash — a 50x swing — and the cache re-bills the entire prompt when one byte
 before the change point differs. So the system prompt carries no date, no
 time, no counters; tool docs are assembled deterministically from the tools
 themselves; skills sort by name; and the working directory goes on the last

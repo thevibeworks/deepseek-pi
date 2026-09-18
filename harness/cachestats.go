@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/thevibeworks/deepseek-pi/ai"
 )
@@ -12,7 +13,7 @@ import (
 // CacheTracker explains prompt-cache misses.
 //
 // The whole cost model of this project rests on the prefix cache: cached input
-// is 0.0028/M against 0.14/M for a miss, a 50x swing. Everything is arranged to
+// is 0.003/M against 0.15/M for a miss on V4.1 Flash, a 50x swing. Everything is arranged to
 // protect it — a byte-stable system prompt, append-only history, tool schemas
 // that never change with a mode switch. But "protected" was an assumption. This
 // makes it an observation.
@@ -174,7 +175,7 @@ func (t *CacheTracker) record(turn int, prev *snapshot, current snapshot, usage 
 	brk := CacheBreak{
 		Turn: turn, Axis: axis, Detail: detail,
 		Expected: expected, Actual: usage.CacheRead, Wasted: shortfall,
-		WastedCost: float64(shortfall) * t.model.Rates.Input / 1_000_000,
+		WastedCost: float64(shortfall) * t.model.RatesAt(time.Now()).Input / 1_000_000,
 		Sanctioned: expectedReason != "",
 	}
 	t.Breaks = append(t.Breaks, brk)

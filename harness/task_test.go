@@ -322,3 +322,35 @@ func TestConcurrentChildrenAreCapped(t *testing.T) {
 	close(release)
 	wg.Wait()
 }
+
+func TestEveryRoleRunsOnTheParentModel(t *testing.T) {
+	// reviewer was pinned to pro until V4.1 Flash (2026-09-10). Every role now
+	// inherits the parent's model, so a flash session never pays pro rates
+	// behind the user's back and a pro session keeps pro everywhere.
+	for _, parent := range []string{ai.ModelFlash, ai.ModelPro} {
+		for _, role := range Roles() {
+			var mu sync.Mutex
+			var sent []string
+			stream := func(context.Context) ai.StreamFunc {
+				return func(_ ai.Context, opts ai.StreamOptions) *ai.Stream {
+					mu.Lock()
+					sent = append(sent, opts.Model)
+					mu.Unlock()
+					final := childAnswer("done")
+					final.Model = opts.Model
+					st := ai.NewStream()
+					go func() { st.Finish(&final) }()
+					return st
+				}
+			}
+			env := testEnv(t, stream, ModeYolo)
+			env.parentModel = ai.MustLookup(parent)
+			if _, err := runTask(t, env, string(role), "do the thing"); err != nil {
+				t.Fatalf("%s under %s: %v", role, parent, err)
+			}
+			if len(sent) == 0 || sent[0] != parent {
+				t.Errorf("%s under a %s parent sent model %v", role, parent, sent)
+			}
+		}
+	}
+}

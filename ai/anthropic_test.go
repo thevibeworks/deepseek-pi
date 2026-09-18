@@ -184,12 +184,13 @@ func TestUsageNormalization(t *testing.T) {
 func TestPriceUsesCacheRateForCachedTokens(t *testing.T) {
 	m := MustLookup(ModelFlash)
 	u := Usage{Input: 100_000, CacheRead: 90_000, Output: 1_000}
-	c := m.Price(u)
+	// Tuesday 12:00 UTC: V4.1 card, off-peak.
+	c := m.PriceAt(u, time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC))
 
-	// 10k miss @ 0.14/M + 90k cached @ 0.0028/M + 1k out @ 0.28/M
-	wantInput := 10_000 * 0.14 / 1e6
-	wantCache := 90_000 * 0.0028 / 1e6
-	wantOutput := 1_000 * 0.28 / 1e6
+	// 10k miss @ 0.15/M + 90k cached @ 0.003/M + 1k out @ 0.6/M
+	wantInput := 10_000 * 0.15 / 1e6
+	wantCache := 90_000 * 0.003 / 1e6
+	wantOutput := 1_000 * 0.6 / 1e6
 	if !approx(c.Input, wantInput) || !approx(c.CacheRead, wantCache) || !approx(c.Output, wantOutput) {
 		t.Errorf("cost = %+v, want input=%.8f cache=%.8f output=%.8f", c, wantInput, wantCache, wantOutput)
 	}
